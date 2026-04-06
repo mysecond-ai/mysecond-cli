@@ -2,30 +2,40 @@
 
 const api = require('../lib/api')
 const files = require('../lib/files')
-const path = require('path')
+
+let cachedCredentials = null
+let lastSyncTime = 0
+const SYNC_INTERVAL_MS = 5000
 
 module.exports = async function sync({ silent } = {}) {
-  const credentials = files.readEnv(process.cwd())
-  if (!credentials) return  // Not a PM OS directory — silently exit
+  if (!cachedCredentials) {
+    cachedCredentials = files.readEnv(process.cwd())
+  }
+  if (!cachedCredentials) return
 
-  const updates = await api.sync(credentials.apiKey, credentials.teamId)
-  if (!updates) return  // API error — silently exit (don't block PM's session)
+  const now = Date.now()
+  if (now - lastSyncTime < SYNC_INTERVAL_MS) return
+  lastSyncTime = now
+
+  const updates = await api.sync(cachedCredentials.apiKey, cachedCredentials.teamId)
+  if (!updates) return
 
   let changeCount = 0
+  const cwd = process.cwd()
 
   for (const [filePath, content] of Object.entries(updates.contextFiles || {})) {
-    const changed = files.writeIfChanged(path.join(process.cwd(), filePath), content)
+    const changed = files.writeIfChanged(files.safePath(cwd, filePath), content)
     if (changed) changeCount++
   }
 
   for (const [slug, content] of Object.entries(updates.customSkills || {})) {
-    const dest = path.join(process.cwd(), `.claude/skills/${slug}/SKILL.md`)
+    const dest = files.safePath(cwd, `.claude/skills/${slug}/SKILL.md`)
     const changed = files.writeIfChanged(dest, content)
     if (changed) changeCount++
   }
 
   for (const [filename, content] of Object.entries(updates.customAgents || {})) {
-    const dest = path.join(process.cwd(), `.claude/agents/${filename}`)
+    const dest = files.safePath(cwd, `.claude/agents/${filename}`)
     const changed = files.writeIfChanged(dest, content)
     if (changed) changeCount++
   }
