@@ -18,9 +18,8 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
+      # Early-fail on type errors before the slower test+build that prepublishOnly runs.
       - run: npm run typecheck
-      - run: npm run build
-      - run: npm test
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

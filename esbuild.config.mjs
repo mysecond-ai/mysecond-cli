@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
+
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
 await build({
   entryPoints: ['src/index.ts'],
@@ -7,13 +10,10 @@ await build({
   target: 'node18',
   format: 'esm',
   outfile: 'dist/mysecond.mjs',
-  // Sentry v8 pulls in optional native modules (@sentry/profiling-node) on some
-  // platforms; esbuild chokes on .node binaries. Externalize so npm resolves it
-  // at install time on the customer's actual platform.
-  external: ['@sentry/node'],
-  // Inject ESM banner so the bundle declares its module shape clearly when run.
-  banner: {
-    js: '// @mysecond/cli — bundled by esbuild',
+  // Bake version at build time — avoids fs read + JSON.parse on every invocation
+  // and removes a runtime dependency on the package.json layout.
+  define: {
+    __VERSION__: JSON.stringify(pkg.version),
   },
   logLevel: 'info',
 });

@@ -8,13 +8,11 @@
 // message so the binary's shape (registry, --help, --version, unknown-subcommand) can be
 // verified before the real command logic lands.
 
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+
+declare const __VERSION__: string;
 
 interface Subcommand {
   name: string;
@@ -40,20 +38,9 @@ const SUBCOMMANDS: readonly Subcommand[] = [
   },
 ];
 
-function readVersion(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // The bundle lives at dist/mysecond.mjs and package.json is one level up.
-  // When running from source (vitest), import.meta.url points to src/, so package.json
-  // is also one level up. Both layouts resolve to ../package.json.
-  const pkgPath = resolve(__dirname, '..', 'package.json');
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
-  return pkg.version;
-}
-
-function printHelp(version: string): void {
+function printHelp(): void {
   const lines = [
-    `mysecond v${version} — mySecond PM Operating System CLI`,
+    `mysecond v${__VERSION__} — mySecond PM Operating System CLI`,
     '',
     'Usage:',
     '  mysecond <subcommand> [options]',
@@ -75,12 +62,12 @@ export async function main(argv: readonly string[]): Promise<number> {
   const first = args[0];
 
   if (first === '--version' || first === '-v') {
-    process.stdout.write(readVersion() + '\n');
+    process.stdout.write(__VERSION__ + '\n');
     return 0;
   }
 
   if (first === undefined || first === '--help' || first === '-h') {
-    printHelp(readVersion());
+    printHelp();
     return 0;
   }
 
@@ -96,5 +83,10 @@ export async function main(argv: readonly string[]): Promise<number> {
   return match.run(args.slice(1));
 }
 
-const exitCode = await main(process.argv);
-process.exit(exitCode);
+main(process.argv).then(
+  (code) => process.exit(code),
+  (err) => {
+    process.stderr.write(`mysecond: unexpected error: ${err && err.stack ? err.stack : err}\n`);
+    process.exit(1);
+  }
+);

@@ -16,6 +16,8 @@ const REPO_ROOT = resolve(__dirname, '..');
 const BIN = resolve(REPO_ROOT, 'bin', 'mysecond.cjs');
 const DIST = resolve(REPO_ROOT, 'dist', 'mysecond.mjs');
 
+const STUB_SUBCOMMANDS = ['init', 'sync', 'artifact-sync'] as const;
+
 interface ExecResult {
   status: number;
   stdout: string;
@@ -64,12 +66,14 @@ describe('mysecond CLI shape', () => {
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 
-  it('lists all 3 subcommands in --help output', () => {
+  it('lists all stub subcommands in --help output', () => {
     const result = runBin(['--help']);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('init');
-    expect(result.stdout).toContain('sync');
-    expect(result.stdout).toContain('artifact-sync');
+    // Tight regex: each subcommand appears as a leading-indented help row, not as a
+    // substring inside another word (e.g., 'init' inside 'not yet implemented').
+    for (const name of STUB_SUBCOMMANDS) {
+      expect(result.stdout).toMatch(new RegExp(`^\\s+${name}\\s`, 'm'));
+    }
   });
 
   it('prints help with no args', () => {
@@ -78,27 +82,16 @@ describe('mysecond CLI shape', () => {
     expect(result.stdout).toContain('Usage:');
   });
 
-  it('exits nonzero on unknown subcommand', () => {
+  it('exits with code 1 on unknown subcommand', () => {
     const result = runBin(['frobnicate']);
-    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(1);
     expect(result.stderr).toContain('unknown subcommand');
   });
 
-  it('init stub exits nonzero with not-implemented message', () => {
-    const result = runBin(['init']);
-    expect(result.status).not.toBe(0);
+  it.each(STUB_SUBCOMMANDS)('%s stub exits 1 with not-implemented message', (name) => {
+    const result = runBin([name]);
+    expect(result.status).toBe(1);
     expect(result.stderr).toContain('not yet implemented');
-  });
-
-  it('sync stub exits nonzero with not-implemented message', () => {
-    const result = runBin(['sync']);
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('not yet implemented');
-  });
-
-  it('artifact-sync stub exits nonzero with not-implemented message', () => {
-    const result = runBin(['artifact-sync']);
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('not yet implemented');
+    expect(result.stderr).toContain(name);
   });
 });
