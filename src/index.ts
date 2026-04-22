@@ -86,6 +86,8 @@ export async function main(argv: readonly string[]): Promise<number> {
 main(process.argv).then(
   (code) => process.exit(code),
   (err) => {
+    // TODO PR 4b: introduce MysecondError class with exitCode field per EDD §8.1
+    // (13 distinct exit values). Right now any unexpected throw collapses to exit 1.
     process.stderr.write(`mysecond: unexpected error: ${err && err.stack ? err.stack : err}\n`);
     process.exit(1);
   }
