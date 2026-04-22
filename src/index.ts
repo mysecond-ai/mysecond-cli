@@ -11,13 +11,15 @@
 import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
+import { exitFromError, MysecondError } from './lib/errors.js';
 
 declare const __VERSION__: string;
 
 interface Subcommand {
   name: string;
   summary: string;
-  run: (args: string[]) => Promise<number>;
+  run: (args: string[], ctx: CommandContext) => Promise<number>;
 }
 
 const SUBCOMMANDS: readonly Subcommand[] = [
@@ -49,8 +51,14 @@ function printHelp(): void {
     ...SUBCOMMANDS.map((cmd) => `  ${cmd.name.padEnd(15)}${cmd.summary}`),
     '',
     'Options:',
-    '  --version, -v    Print version and exit',
-    '  --help, -h       Print this help and exit',
+    '  --version, -v          Print version and exit',
+    '  --help, -h             Print this help and exit',
+    '  --silent               Suppress non-essential output (used by hooks)',
+    '  --dry-run              Show what would happen, make no changes',
+    '  --api-key <key>        Override COMPANION_API_KEY env',
+    '  --project-dir <path>   Override $CLAUDE_PROJECT_DIR / cwd',
+    '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
+    '  --force-update         Bypass the 24-hour npm-update timebox in sync',
     '',
     'Docs: https://mysecond.ai',
   ];
@@ -80,15 +88,25 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 1;
   }
 
-  return match.run(args.slice(1));
+  // Parse global flags from the subcommand's args (everything after the subcommand name).
+  // Unknown flags fall through to positional args, which subcommands inspect themselves.
+  let ctx: CommandContext;
+  try {
+    const flags = parseGlobalFlags(args.slice(1));
+    ctx = buildContext(flags);
+    return await match.run(flags.positional, ctx);
+  } catch (err) {
+    // parseGlobalFlags throws Error (not MysecondError) for malformed flag values —
+    // treat as user-input error (exit 1) with the original message.
+    if (err instanceof Error && !(err instanceof MysecondError)) {
+      process.stderr.write(`mysecond: ${err.message}\n`);
+      return 1;
+    }
+    return exitFromError(err);
+  }
 }
 
 main(process.argv).then(
   (code) => process.exit(code),
-  (err) => {
-    // TODO PR 4b: introduce MysecondError class with exitCode field per EDD §8.1
-    // (13 distinct exit values). Right now any unexpected throw collapses to exit 1.
-    process.stderr.write(`mysecond: unexpected error: ${err && err.stack ? err.stack : err}\n`);
-    process.exit(1);
-  }
+  (err) => process.exit(exitFromError(err))
 );
