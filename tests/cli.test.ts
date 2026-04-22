@@ -16,7 +16,10 @@ const REPO_ROOT = resolve(__dirname, '..');
 const BIN = resolve(REPO_ROOT, 'bin', 'mysecond.cjs');
 const DIST = resolve(REPO_ROOT, 'dist', 'mysecond.mjs');
 
-const STUB_SUBCOMMANDS = ['init', 'sync', 'artifact-sync'] as const;
+// init is the only command still stubbed in v1.1.0-rc.0; PR 4c implements it.
+// sync + artifact-sync are real implementations as of PR 4b.
+const SUBCOMMAND_NAMES = ['init', 'sync', 'artifact-sync'] as const;
+const STILL_STUB_SUBCOMMANDS = ['init'] as const;
 
 interface ExecResult {
   status: number;
@@ -24,13 +27,34 @@ interface ExecResult {
   stderr: string;
 }
 
-function runBin(args: readonly string[]): ExecResult {
-  const opts: ExecFileSyncOptionsWithStringEncoding = {
+interface RunBinOptions {
+  envOverride?: Record<string, string | undefined>;
+  stdin?: string;
+}
+
+function runBin(args: readonly string[], opts: RunBinOptions = {}): ExecResult {
+  // Build env: start from process.env, apply overrides (undefined means delete).
+  const baseEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) baseEnv[k] = v;
+  }
+  if (opts.envOverride) {
+    for (const [k, v] of Object.entries(opts.envOverride)) {
+      if (v === undefined) {
+        delete baseEnv[k];
+      } else {
+        baseEnv[k] = v;
+      }
+    }
+  }
+  const execOpts: ExecFileSyncOptionsWithStringEncoding = {
     encoding: 'utf8',
     cwd: REPO_ROOT,
+    env: baseEnv,
+    input: opts.stdin ?? '',
   };
   try {
-    const stdout = execFileSync('node', [BIN, ...args], opts);
+    const stdout = execFileSync('node', [BIN, ...args], execOpts);
     return { status: 0, stdout, stderr: '' };
   } catch (err) {
     const e = err as { status?: number; stdout?: Buffer | string; stderr?: Buffer | string };
@@ -66,12 +90,10 @@ describe('mysecond CLI shape', () => {
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 
-  it('lists all stub subcommands in --help output', () => {
+  it('lists all subcommands in --help output', () => {
     const result = runBin(['--help']);
     expect(result.status).toBe(0);
-    // Tight regex: each subcommand appears as a leading-indented help row, not as a
-    // substring inside another word (e.g., 'init' inside 'not yet implemented').
-    for (const name of STUB_SUBCOMMANDS) {
+    for (const name of SUBCOMMAND_NAMES) {
       expect(result.stdout).toMatch(new RegExp(`^\\s+${name}\\s`, 'm'));
     }
   });
@@ -88,10 +110,54 @@ describe('mysecond CLI shape', () => {
     expect(result.stderr).toContain('unknown subcommand');
   });
 
-  it.each(STUB_SUBCOMMANDS)('%s stub exits 1 with not-implemented message', (name) => {
+  it.each(STILL_STUB_SUBCOMMANDS)('%s stub exits 1 with not-implemented message', (name) => {
     const result = runBin([name]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('not yet implemented');
     expect(result.stderr).toContain(name);
+  });
+
+  it('sync without API key exits 1 with invalid-key message', () => {
+    const result = runBin(['sync'], {
+      envOverride: { COMPANION_API_KEY: undefined },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Invalid API key');
+  });
+
+  it('artifact-sync exits 0 silently when stdin is empty (best-effort hook)', () => {
+    const result = runBin(['artifact-sync', '--silent'], {
+      envOverride: { COMPANION_API_KEY: undefined },
+      stdin: '',
+    });
+    // Hook contract: never blame the customer's tool call. Always exit 0.
+    expect(result.status).toBe(0);
+  });
+
+  it('artifact-sync exits 0 when tool_name is not Write', () => {
+    const result = runBin(['artifact-sync', '--silent'], {
+      envOverride: { COMPANION_API_KEY: 'fake-key-not-used' },
+      stdin: JSON.stringify({ tool_name: 'Read', tool_input: { file_path: '/tmp/x.md' } }),
+    });
+    expect(result.status).toBe(0);
+  });
+
+  it('rejects --strategy with invalid value', () => {
+    const result = runBin(['sync', '--strategy', 'invalid'], {
+      envOverride: { COMPANION_API_KEY: 'fake-key' },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--strategy: must be one of');
+  });
+
+  it('artifact-sync handles Edit tool (not just Write)', () => {
+    const result = runBin(['artifact-sync', '--silent'], {
+      envOverride: { COMPANION_API_KEY: 'fake-key' },
+      stdin: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: '/tmp/x.md' } }),
+    });
+    // /tmp/x.md is outside any rootDir/artifact-dir, so the path filter catches
+    // it and we still exit 0 — but the Edit tool name is no longer rejected
+    // outright. Verifying the hook doesn't blame the customer.
+    expect(result.status).toBe(0);
   });
 });

@@ -1,23 +1,17 @@
-// @mysecond/cli — entry point.
-//
-// Dispatches to subcommand stubs. Real implementations land in:
-//   - PR 4b: `mysecond sync` + `mysecond artifact-sync`
-//   - PR 4c: `mysecond init`
-//
-// This v1.1.0 scaffold ships with stubs that exit cleanly with a "not yet implemented"
-// message so the binary's shape (registry, --help, --version, unknown-subcommand) can be
-// verified before the real command logic lands.
+// @mysecond/cli — entry point. Parses global flags, builds CommandContext, dispatches.
 
 import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
+import { exitFromError } from './lib/errors.js';
 
 declare const __VERSION__: string;
 
 interface Subcommand {
   name: string;
   summary: string;
-  run: (args: string[]) => Promise<number>;
+  run: (args: string[], ctx: CommandContext) => Promise<number>;
 }
 
 const SUBCOMMANDS: readonly Subcommand[] = [
@@ -49,8 +43,14 @@ function printHelp(): void {
     ...SUBCOMMANDS.map((cmd) => `  ${cmd.name.padEnd(15)}${cmd.summary}`),
     '',
     'Options:',
-    '  --version, -v    Print version and exit',
-    '  --help, -h       Print this help and exit',
+    '  --version, -v          Print version and exit',
+    '  --help, -h             Print this help and exit',
+    '  --silent               Suppress non-essential output (used by hooks)',
+    '  --dry-run              Show what would happen, make no changes',
+    '  --api-key <key>        Override COMPANION_API_KEY env',
+    '  --project-dir <path>   Override $CLAUDE_PROJECT_DIR / cwd',
+    '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
+    '  --force-update         Bypass the 24-hour npm-update timebox in sync',
     '',
     'Docs: https://mysecond.ai',
   ];
@@ -80,15 +80,16 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 1;
   }
 
-  return match.run(args.slice(1));
+  try {
+    const flags = parseGlobalFlags(args.slice(1));
+    const ctx = buildContext(flags);
+    return await match.run(flags.positional, ctx);
+  } catch (err) {
+    return exitFromError(err);
+  }
 }
 
 main(process.argv).then(
   (code) => process.exit(code),
-  (err) => {
-    // TODO PR 4b: introduce MysecondError class with exitCode field per EDD §8.1
-    // (13 distinct exit values). Right now any unexpected throw collapses to exit 1.
-    process.stderr.write(`mysecond: unexpected error: ${err && err.stack ? err.stack : err}\n`);
-    process.exit(1);
-  }
+  (err) => process.exit(exitFromError(err))
 );
