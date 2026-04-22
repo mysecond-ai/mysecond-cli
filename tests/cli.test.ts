@@ -147,6 +147,17 @@ describe('mysecond CLI shape', () => {
       envOverride: { COMPANION_API_KEY: 'fake-key' },
     });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('--strategy must be one of');
+    expect(result.stderr).toContain('--strategy: must be one of');
+  });
+
+  it('artifact-sync handles Edit tool (not just Write)', () => {
+    const result = runBin(['artifact-sync', '--silent'], {
+      envOverride: { COMPANION_API_KEY: 'fake-key' },
+      stdin: JSON.stringify({ tool_name: 'Edit', tool_input: { file_path: '/tmp/x.md' } }),
+    });
+    // /tmp/x.md is outside any rootDir/artifact-dir, so the path filter catches
+    // it and we still exit 0 — but the Edit tool name is no longer rejected
+    // outright. Verifying the hook doesn't blame the customer.
+    expect(result.status).toBe(0);
   });
 });

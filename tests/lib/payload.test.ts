@@ -8,7 +8,7 @@ describe('classifyArtifactType', () => {
     expect(classifyArtifactType('strategy/outputs/bar.md')).toBe('strategy');
     expect(classifyArtifactType('discovery/outputs/baz.md')).toBe('research');
     expect(classifyArtifactType('launch/outputs/x.md')).toBe('launch');
-    expect(classifyArtifactType('analytics/outputs/y.md')).toBe('other');
+    expect(classifyArtifactType('analytics/outputs/y.md')).toBe('analytics');
     expect(classifyArtifactType('workflows/foo/outputs/z.md')).toBe('other');
   });
 

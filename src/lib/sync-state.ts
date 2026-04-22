@@ -1,9 +1,6 @@
 // .claude/sync-state.json — read/write the local sync ledger.
-//
-// Schema preserved from legacy sync-context.js. Adds last_npm_update_at for
-// the 24-hour npm-update timebox per EDD §5.3.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { projectPaths } from './files.js';
@@ -23,6 +20,7 @@ export interface SyncState {
   files: Record<string, SyncStateFileEntry>;
   artifacts: Record<string, SyncStateArtifactEntry>;
   lastSyncedAt: string | null;
+  // EDD §5.3 — 24h npm-update timebox cache.
   lastNpmUpdateAt: string | null;
 }
 
@@ -51,7 +49,7 @@ export function readSyncState(rootDir: string): SyncState {
 
 export function writeSyncState(rootDir: string, state: SyncState): void {
   const path = projectPaths(rootDir).syncStatePath;
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  // mkdirSync recursive is a no-op if the directory exists.
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2) + '\n');
 }

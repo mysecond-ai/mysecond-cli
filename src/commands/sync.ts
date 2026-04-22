@@ -1,8 +1,7 @@
 // `mysecond sync` — pull context/skills/agents/workflows from mysecond.ai,
-// push local artifacts back up. Ported from legacy sync-context.js per EDD §5.
+// push local artifacts back up. EDD §5.
 
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 import { cliSync, artifactsSync, confirmFirstSetup } from '../lib/api.js';
 import type { CommandContext } from '../lib/context.js';
@@ -11,14 +10,12 @@ import { MysecondError } from '../lib/errors.js';
 import {
   projectPaths,
   readLocalFile,
-  shortHash,
   writeLocalFile,
   deleteLocalFile,
 } from '../lib/files.js';
 import { markNpmUpdated, shouldRunNpmUpdate } from '../lib/npm.js';
 import {
-  ARTIFACT_DIRS,
-  type ArtifactPayload,
+  scanArtifacts,
   type CompanionFile,
   type ContextFile,
 } from '../lib/payload.js';
@@ -26,6 +23,11 @@ import { readSyncState, writeSyncState, type SyncState } from '../lib/sync-state
 
 const TEAM_OVERRIDE_START = '<!-- TEAM_OVERRIDE:START -->';
 const TEAM_OVERRIDE_END = '<!-- TEAM_OVERRIDE:END -->';
+
+// CAIO finding: SessionStart hooks shouldn't block session start visibly. Tighten
+// the cliSync timeout when running silently (hook path); keep the longer default
+// for manual sync runs where the customer expects a live operation.
+const SILENT_SYNC_TIMEOUT_MS = 8_000;
 
 interface SyncSummary {
   created: number;
@@ -119,52 +121,6 @@ function mergeClaudeMdOverride(claudeMdPath: string, override: string): void {
   writeFileSync(claudeMdPath, next);
 }
 
-function scanArtifacts(rootDir: string): ArtifactPayload[] {
-  const found: ArtifactPayload[] = [];
-  for (const entry of ARTIFACT_DIRS) {
-    const dir = join(rootDir, entry.relativeDir);
-    if (!existsSync(dir)) continue;
-    walkArtifactDir(rootDir, dir, entry.type, found);
-  }
-  return found;
-}
-
-function walkArtifactDir(
-  rootDir: string,
-  currentDir: string,
-  artifactType: ArtifactPayload['artifact_type'],
-  results: ArtifactPayload[]
-): void {
-  const entries = readdirSync(currentDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = join(currentDir, entry.name);
-    if (entry.isDirectory()) {
-      walkArtifactDir(rootDir, fullPath, artifactType, results);
-      continue;
-    }
-    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-
-    const content = readFileSync(fullPath, 'utf8');
-    const relativePath = relative(rootDir, fullPath);
-    // Parent dir naming convention: YYYY-MM-DD-HHMM-<pm-name>
-    const parentDir = currentDir.split('/').pop() ?? '';
-    const pmNameMatch = parentDir.match(/^\d{4}-\d{2}-\d{2}-\d{4}-(.+)$/);
-    const pmName = pmNameMatch && pmNameMatch[1] !== undefined ? pmNameMatch[1] : null;
-    const skillSlug = entry.name
-      .replace(/^\d{4}-\d{2}-\d{2}-\d{4}-/, '')
-      .replace(/\.md$/, '');
-    results.push({
-      file_path: relativePath,
-      content,
-      current_hash: shortHash(content),
-      artifact_type: artifactType,
-      pm_name: pmName,
-      skill_slug: skillSlug.length > 0 ? skillSlug : null,
-      produced_at: new Date().toISOString(),
-    });
-  }
-}
-
 async function upSyncArtifacts(
   ctx: CommandContext,
   state: SyncState
@@ -187,6 +143,11 @@ async function upSyncArtifacts(
 }
 
 function printSummary(summary: SyncSummary, ctx: CommandContext): void {
+  // CAIO finding: stderr from SessionStart hooks is silently dropped on exit 0.
+  // Customer-relevant messages MUST go to stdout when ctx.silent so Claude sees
+  // them as session-start context and can mention them to the customer.
+  const out = ctx.silent ? process.stdout : process.stdout;
+
   if (ctx.silent) {
     const parts: string[] = [];
     const contextChanges =
@@ -198,9 +159,9 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
     if (summary.artifactsPushed > 0) parts.push(`${summary.artifactsPushed} artifacts pushed`);
     const conflicts =
       summary.conflictsCloudKept + summary.conflictsLocalKept + summary.conflictsSkipped;
-    if (conflicts > 0) parts.push(`${conflicts} conflicts`);
+    if (conflicts > 0) parts.push(`${conflicts} conflicts (see .claude/sync-conflicts/)`);
     if (parts.length > 0) {
-      process.stdout.write(`mysecond: ${parts.join(', ')}\n`);
+      out.write(`mysecond: ${parts.join(', ')}\n`);
     }
     return;
   }
@@ -220,11 +181,9 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   if (summary.claudeMdUpdated) parts.push('CLAUDE.md updated');
   if (parts.length === 0) parts.push('nothing changed');
 
-  process.stdout.write(`✓ Sync complete: ${parts.join(', ')}.\n`);
+  out.write(`✓ Sync complete: ${parts.join(', ')}.\n`);
   if (summary.conflictsCloudKept > 0 || summary.conflictsLocalKept > 0) {
-    process.stdout.write(
-      `  Recover backed-up versions from .claude/sync-conflicts/ if needed.\n`
-    );
+    out.write(`  Recover backed-up versions from .claude/sync-conflicts/ if needed.\n`);
   }
 }
 
@@ -240,7 +199,15 @@ export async function runSync(
   const state = readSyncState(ctx.rootDir);
   const previousPaths = Object.keys(state.files);
 
-  const response = await cliSync(ctx, previousPaths);
+  // Quality bug-catch: capture lastSyncedAt BEFORE the response overwrites it
+  // on line ~225. Without this snapshot, the wasFirstSync check below would
+  // always be true and confirmFirstSetup() would fire on every sync.
+  const priorLastSyncedAt = state.lastSyncedAt;
+
+  const cliSyncOpts: { timeoutMs?: number } = ctx.silent
+    ? { timeoutMs: SILENT_SYNC_TIMEOUT_MS }
+    : {};
+  const response = await cliSync(ctx, previousPaths, cliSyncOpts);
   const contextFiles: ContextFile[] = response.context_files ?? response.files ?? [];
   const customSkills = response.custom_skills ?? [];
   const customAgents = response.custom_agents ?? [];
@@ -250,14 +217,12 @@ export async function runSync(
 
   const paths = projectPaths(ctx.rootDir);
 
-  // Down-sync context files — conflict detection per src/lib/conflict.ts.
   for (const file of contextFiles) {
     const localContent = readLocalFile(paths.contextDir, file.file_path);
     const outcome = resolveConflict({ file, localContent, syncState: state, ctx });
     tally(summary, outcome);
   }
 
-  // Deletions — cloud says these no longer apply; remove locally if present.
   for (const filePath of deletedPaths) {
     if (deleteLocalFile(paths.contextDir, filePath)) {
       delete state.files[filePath];
@@ -265,8 +230,6 @@ export async function runSync(
     }
   }
 
-  // Companion-wins for skills / agents / workflows. No conflict detection — these
-  // are owned by the server and customers should never edit the bundled files.
   for (const file of customSkills) {
     if (syncCompanionFile(paths.skillsDir, file)) summary.skillsUpdated++;
   }
@@ -282,8 +245,9 @@ export async function runSync(
     summary.claudeMdUpdated = true;
   }
 
-  // Up-sync artifacts (best-effort — failure is non-fatal so the down-sync still
-  // succeeds for the customer).
+  // Up-sync is best-effort: failure here doesn't fail the sync command. In
+  // silent mode we swallow the failure entirely (transient hook noise isn't
+  // worth surfacing on session start); in interactive mode we report it.
   try {
     summary.artifactsPushed = await upSyncArtifacts(ctx, state);
   } catch (err) {
@@ -294,21 +258,21 @@ export async function runSync(
     }
   }
 
-  // 24h npm-update timebox — gate is honored, actual `npm update` lands in a
-  // future PR once the customer plugin slug is provisioned by `mysecond init`.
+  // The 24h gate is honored; actual `npm update -g @mysecond/customer-{slug}`
+  // invocation lands when PR 4c provisions the customer plugin slug to local
+  // state. Until then the gate just stamps the timestamp so the cadence starts
+  // from install day.
   if (shouldRunNpmUpdate(state, ctx)) {
     markNpmUpdated(state);
     summary.npmUpdateRan = true;
   }
 
-  // Persist updated state. lastSyncedAt comes from the server response so the
-  // CLI's clock skew can't drift the ledger.
   state.lastSyncedAt = response.syncedAt;
   writeSyncState(ctx.rootDir, state);
 
-  // First-sync confirmation — fire-and-forget; failure doesn't impact the user.
-  const wasFirstSync =
-    state.lastSyncedAt !== null && Object.keys(state.files).length > 0 && previousPaths.length === 0;
+  // First-sync = no prior server timestamp AND no prior tracked paths. Both
+  // checks must use the snapshots captured before any state mutations above.
+  const wasFirstSync = priorLastSyncedAt === null && previousPaths.length === 0;
   if (wasFirstSync) {
     await confirmFirstSetup(ctx);
   }

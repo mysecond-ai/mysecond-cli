@@ -1,18 +1,10 @@
-// @mysecond/cli — entry point.
-//
-// Dispatches to subcommand stubs. Real implementations land in:
-//   - PR 4b: `mysecond sync` + `mysecond artifact-sync`
-//   - PR 4c: `mysecond init`
-//
-// This v1.1.0 scaffold ships with stubs that exit cleanly with a "not yet implemented"
-// message so the binary's shape (registry, --help, --version, unknown-subcommand) can be
-// verified before the real command logic lands.
+// @mysecond/cli — entry point. Parses global flags, builds CommandContext, dispatches.
 
 import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
-import { exitFromError, MysecondError } from './lib/errors.js';
+import { exitFromError } from './lib/errors.js';
 
 declare const __VERSION__: string;
 
@@ -88,20 +80,11 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 1;
   }
 
-  // Parse global flags from the subcommand's args (everything after the subcommand name).
-  // Unknown flags fall through to positional args, which subcommands inspect themselves.
-  let ctx: CommandContext;
   try {
     const flags = parseGlobalFlags(args.slice(1));
-    ctx = buildContext(flags);
+    const ctx = buildContext(flags);
     return await match.run(flags.positional, ctx);
   } catch (err) {
-    // parseGlobalFlags throws Error (not MysecondError) for malformed flag values —
-    // treat as user-input error (exit 1) with the original message.
-    if (err instanceof Error && !(err instanceof MysecondError)) {
-      process.stderr.write(`mysecond: ${err.message}\n`);
-      return 1;
-    }
     return exitFromError(err);
   }
 }

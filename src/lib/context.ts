@@ -1,11 +1,10 @@
-// CommandContext — runtime context built once in main() and threaded through every
-// subcommand. Centralizes config resolution so subcommands don't re-parse env vars,
-// re-read .env files, or re-derive paths.
-//
-// Per EDD-solo-phase-4-pmkit-cli.md §5 + CTO PR 4a forward-work item #1.
+// CommandContext — runtime context built once in main() and threaded through
+// every subcommand.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
+
+import { MysecondError } from './errors.js';
 
 export type ConflictStrategy = 'prompt' | 'cloud-wins' | 'local-wins' | 'skip';
 
@@ -52,20 +51,21 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.forceUpdate = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
-      if (next === undefined) throw new Error('--api-key requires a value');
+      if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
       out.apiKey = next;
       i++;
     } else if (arg === '--project-dir') {
       const next = args[i + 1];
-      if (next === undefined) throw new Error('--project-dir requires a value');
+      if (next === undefined) throw MysecondError.invalidFlag('--project-dir', 'requires a value');
       out.projectDir = next;
       i++;
     } else if (arg === '--strategy') {
       const next = args[i + 1];
-      if (next === undefined) throw new Error('--strategy requires a value');
+      if (next === undefined) throw MysecondError.invalidFlag('--strategy', 'requires a value');
       if (!STRATEGIES.has(next)) {
-        throw new Error(
-          `--strategy must be one of: prompt, cloud-wins, local-wins, skip (got '${next}')`
+        throw MysecondError.invalidFlag(
+          '--strategy',
+          `must be one of: prompt, cloud-wins, local-wins, skip (got '${next}')`
         );
       }
       out.strategy = next as ConflictStrategy;

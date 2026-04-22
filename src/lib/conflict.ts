@@ -1,17 +1,14 @@
-// Conflict resolution for context files — minimum safety net (Option 1).
+// Conflict resolution for context files — minimum safety net (Option 1 per
+// Ron + CXO 2026-04-22 design call). When local and cloud both diverged since
+// last sync: pick a side per ctx.strategy, write a timestamped backup of the
+// loser, emit one notification line. Solo conflicts are 0-2x/month per
+// customer; heavier UX (interactive prompt protocol, RECENT.md log surface,
+// CLAUDE.md @import breadcrumb) deferred until customer feedback demands it.
 //
-// Per Ron + CXO call (PR 4b design session 2026-04-22): when both local and cloud
-// versions of a context file have changed since last sync, take the cloud version
-// and write a timestamped backup of the local version so the customer can recover
-// it manually. Emit a single stderr line. No interactive prompt by default.
-//
-// Solo conflicts are rare (0-2x/month per customer). Heavier UX (interactive
-// strategy flag, recent-conflicts log file, CLAUDE.md @import surface) deferred
-// until Team tier or until customer feedback demands it.
-//
-// The --strategy flag (parsed in src/lib/context.ts) gives advanced users an
-// override: prompt | cloud-wins | local-wins | skip. The default is set by
-// buildContext() based on TTY detection.
+// CAIO finding (PR 4b review): stderr from SessionStart hooks is silently
+// dropped on exit 0. Conflict notifications must go to STDOUT in --silent mode
+// so Claude sees them as session-start context and can mention them to the
+// customer. TTY (terminal) keeps stderr where it's visible directly.
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -37,13 +34,13 @@ interface SyncContextFileInput {
   ctx: CommandContext;
 }
 
-// Pure conflict classifier — no I/O. Decides the resolution path based on what
-// changed since last sync. Caller does the actual writes.
-export function classifyConflict(input: SyncContextFileInput): {
+interface ChangeFlags {
   cloudChanged: boolean;
   localChanged: boolean;
   isFirstSeen: boolean;
-} {
+}
+
+function classifyConflict(input: SyncContextFileInput): ChangeFlags {
   const { file, localContent, syncState } = input;
   const lastSynced = syncState.files[file.file_path];
 
@@ -52,7 +49,10 @@ export function classifyConflict(input: SyncContextFileInput): {
   }
   if (!lastSynced) {
     // First sync after the file already existed locally. Treat byte-equal as
-    // "in sync"; otherwise the divergence is a conflict.
+    // "in sync"; otherwise flag both sides as changed so it falls into the
+    // conflict path. The asymmetric assignment (both true OR both false from
+    // a single sameBytes check) is intentional — we have no baseline to
+    // distinguish which side moved, so we treat any divergence as a conflict.
     const sameBytes = localContent === file.content;
     return { cloudChanged: !sameBytes, localChanged: !sameBytes, isFirstSeen: true };
   }
@@ -65,78 +65,79 @@ export function classifyConflict(input: SyncContextFileInput): {
   };
 }
 
-// Resolve a conflict according to ctx.strategy. Writes any backup files needed
-// and returns the outcome for the caller to summarize.
+function recordSyncedFile(
+  state: SyncState,
+  filePath: string,
+  localContent: string,
+  cloudHash: string,
+  nowIso: string
+): void {
+  state.files[filePath] = {
+    localHash: sha256(localContent),
+    cloudHash,
+    lastSyncedAt: nowIso,
+  };
+}
+
+function emitNotice(message: string, ctx: CommandContext): void {
+  // CAIO: stdout in silent mode (SessionStart hook) so Claude reads it as
+  // session-start context. Stderr in TTY mode where the customer sees it.
+  const stream = ctx.silent ? process.stdout : process.stderr;
+  stream.write(message + '\n');
+}
+
 export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   const { file, localContent, syncState, ctx } = input;
   const { contextDir, conflictsDir } = projectPaths(ctx.rootDir);
-  const lastSynced = syncState.files[file.file_path];
   const nowIso = new Date().toISOString();
 
-  // Branch 1: local doesn't exist — pure create from cloud.
   if (localContent === null) {
     const ok = writeLocalFile(contextDir, file.file_path, file.content);
     if (!ok) return { kind: 'conflict-skipped' };
-    syncState.files[file.file_path] = {
-      localHash: sha256(file.content),
-      cloudHash: file.current_hash,
-      lastSyncedAt: nowIso,
-    };
+    recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
     return { kind: 'created', writtenPath: file.file_path };
   }
 
   const { cloudChanged, localChanged, isFirstSeen } = classifyConflict(input);
 
-  // Branch 2: nothing diverged — record current hashes and move on.
   if (!cloudChanged && !localChanged) {
-    if (!lastSynced) {
-      syncState.files[file.file_path] = {
-        localHash: sha256(localContent),
-        cloudHash: file.current_hash,
-        lastSyncedAt: nowIso,
-      };
+    if (!syncState.files[file.file_path]) {
+      recordSyncedFile(syncState, file.file_path, localContent, file.current_hash, nowIso);
     }
     return { kind: 'unchanged' };
   }
 
-  // Branch 3: only cloud changed — pull cloud over local.
   if (cloudChanged && !localChanged) {
     const ok = writeLocalFile(contextDir, file.file_path, file.content);
     if (!ok) return { kind: 'conflict-skipped' };
-    syncState.files[file.file_path] = {
-      localHash: sha256(file.content),
-      cloudHash: file.current_hash,
-      lastSyncedAt: nowIso,
-    };
+    recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
     return { kind: 'updated-from-cloud', writtenPath: file.file_path };
   }
 
-  // Branch 4: only local changed — keep local; record so future syncs see this
-  // as the new baseline. Cloud version remains stale on the server (legacy
-  // architecture: context files don't push up via this path).
   if (localChanged && !cloudChanged) {
-    syncState.files[file.file_path] = {
-      localHash: sha256(localContent),
-      cloudHash: file.current_hash,
-      lastSyncedAt: nowIso,
-    };
+    recordSyncedFile(syncState, file.file_path, localContent, file.current_hash, nowIso);
     return { kind: 'kept-local' };
   }
 
-  // Branch 5: both changed (or first-seen with divergent bytes) — real conflict.
-  // Apply the strategy. For Option 1 minimum safety net, "cloud-wins" is the
-  // default for non-TTY surfaces; backups always written either way.
+  // Real conflict — both sides moved. Write backup, apply chosen side per
+  // strategy, emit notification. Backup naming uses path-safe characters so
+  // file_paths with slashes/dots produce a single readable filename.
   const safeName = file.file_path.replace(/[^A-Za-z0-9._-]+/g, '_');
   const stamp = nowIso.replace(/[:.]/g, '-');
   mkdirSync(conflictsDir, { recursive: true });
 
+  // Edge case (CTO finding): in --silent mode, ctx.strategy defaults to
+  // cloud-wins via buildContext, so this branch only fires when the customer
+  // explicitly passed --strategy=prompt (unusual in a hook context). On a
+  // brand-new install isFirstSeen is true for every file — a real conflict
+  // there gets silently skipped rather than auto-resolved. Acceptable given
+  // 0-2 conflicts/month, but documented so a future dev doesn't "fix" it.
   if (ctx.strategy === 'skip' || (ctx.strategy === 'prompt' && isFirstSeen && ctx.silent)) {
-    // Skip resolution but still record the cloud version so the customer can
-    // diff manually if they care.
     const cloudBackup = join(conflictsDir, `${safeName}-cloud-${stamp}.md`);
     writeLocalFile(conflictsDir, `${safeName}-cloud-${stamp}.md`, file.content);
-    process.stderr.write(
-      `Conflict in context/${file.file_path} — skipped. Cloud version saved to ${cloudBackup}\n`
+    emitNotice(
+      `Conflict in context/${file.file_path} — skipped. Cloud version saved to ${cloudBackup}`,
+      ctx
     );
     return { kind: 'conflict-skipped' };
   }
@@ -144,30 +145,24 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   if (ctx.strategy === 'local-wins') {
     const cloudBackup = join(conflictsDir, `${safeName}-cloud-${stamp}.md`);
     writeLocalFile(conflictsDir, `${safeName}-cloud-${stamp}.md`, file.content);
-    syncState.files[file.file_path] = {
-      localHash: sha256(localContent),
-      cloudHash: file.current_hash,
-      lastSyncedAt: nowIso,
-    };
-    process.stderr.write(
-      `Conflict in context/${file.file_path} — kept local. Cloud version saved to ${cloudBackup}\n`
+    recordSyncedFile(syncState, file.file_path, localContent, file.current_hash, nowIso);
+    emitNotice(
+      `Conflict in context/${file.file_path} — kept local. Cloud version saved to ${cloudBackup}`,
+      ctx
     );
     return { kind: 'conflict-local-kept', backupPath: cloudBackup };
   }
 
-  // Default + cloud-wins + non-interactive prompt fallback: take cloud, back up
-  // local. This is the Option 1 minimum safety net path most customers hit.
+  // Default + cloud-wins + non-interactive prompt fallback: take cloud, back
+  // up local. Most customers hit this path.
   const localBackup = join(conflictsDir, `${safeName}-local-${stamp}.md`);
   writeLocalFile(conflictsDir, `${safeName}-local-${stamp}.md`, localContent);
   const ok = writeLocalFile(contextDir, file.file_path, file.content);
   if (!ok) return { kind: 'conflict-skipped' };
-  syncState.files[file.file_path] = {
-    localHash: sha256(file.content),
-    cloudHash: file.current_hash,
-    lastSyncedAt: nowIso,
-  };
-  process.stderr.write(
-    `Conflict in context/${file.file_path} — kept cloud version (your local edits saved to ${localBackup})\n`
+  recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
+  emitNotice(
+    `Conflict in context/${file.file_path} — kept cloud version (your local edits saved to ${localBackup})`,
+    ctx
   );
   return { kind: 'conflict-cloud-kept', writtenPath: file.file_path, backupPath: localBackup };
 }

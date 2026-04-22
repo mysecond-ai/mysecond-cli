@@ -102,6 +102,10 @@ export class MysecondError extends Error {
       'mysecond is paused for a brief rollback window. Try again in a few minutes.'
     );
   }
+
+  static invalidFlag(flagName: string, detail: string): MysecondError {
+    return new MysecondError(1, `${flagName}: ${detail}`);
+  }
 }
 
 // Helper for main() catch — translates any thrown value into an exit code + stderr message.

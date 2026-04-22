@@ -33,11 +33,11 @@ describe('parseGlobalFlags', () => {
   });
 
   it('throws on missing value for --api-key', () => {
-    expect(() => parseGlobalFlags(['--api-key'])).toThrow('--api-key requires a value');
+    expect(() => parseGlobalFlags(['--api-key'])).toThrow('--api-key: requires a value');
   });
 
   it('throws on invalid --strategy value', () => {
-    expect(() => parseGlobalFlags(['--strategy', 'bogus'])).toThrow('--strategy must be one of');
+    expect(() => parseGlobalFlags(['--strategy', 'bogus'])).toThrow('--strategy: must be one of');
   });
 
   it('collects positional args', () => {

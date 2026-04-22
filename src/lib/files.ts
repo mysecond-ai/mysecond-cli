@@ -1,11 +1,7 @@
 // File utilities — sha256, safe path resolution, atomic-style local I/O.
-//
-// Ported from legacy v1.0.0 sync-context.js lines 213-273 + safePath hardening
-// preserved from /simplify pass at commit 4d281e0 in this repo's git history.
 
 import { createHash } from 'node:crypto';
 import {
-  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -13,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 
 export function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
@@ -24,26 +20,33 @@ export function shortHash(content: string): string {
 }
 
 // safePath — resolve a relative path under baseDir, refusing path traversal,
-// absolute paths, and any resolved location that escapes baseDir.
-//
-// Threat model: server response includes a `file_path` like "context/company.md".
-// A compromised or malicious server could return "../../../etc/passwd" or
-// "/etc/passwd" — without this guard, writeLocalFile would happily clobber
-// arbitrary files on the customer's machine.
+// absolute paths, and any resolved location that escapes baseDir. Threat model:
+// a compromised server returning "../../etc/passwd" or "/etc/passwd" would
+// otherwise let writeLocalFile clobber arbitrary files.
 export function safePath(baseDir: string, filePath: string): string | null {
   const normalized = normalize(filePath);
   if (isAbsolute(normalized) || normalized.startsWith('..') || normalized.includes('/../')) {
     return null;
   }
   const resolved = resolve(baseDir, normalized);
-  // Final containment check: even after normalization, the resolved path must
-  // live under baseDir. relative() returns a path that starts with '..' or is
-  // absolute if it escapes.
   const rel = relative(baseDir, resolved);
   if (rel.startsWith('..') || isAbsolute(rel)) {
     return null;
   }
   return resolved;
+}
+
+// Convert an absolute path back to a project-relative one if it lives inside
+// rootDir. Returns null for paths outside the project tree, or for relative
+// inputs that aren't already within a recognized project layout. Cross-platform
+// safe via path.sep (no hardcoded '/').
+export function relativeFromRoot(rootDir: string, filePath: string): string | null {
+  if (filePath.startsWith(rootDir + sep) || filePath === rootDir) {
+    return filePath.slice(rootDir.length + 1);
+  }
+  if (isAbsolute(filePath)) return null;
+  // Relative input — accept as-is; downstream callers re-validate via safePath.
+  return filePath;
 }
 
 export function readLocalFile(baseDir: string, filePath: string): string | null {
@@ -62,8 +65,9 @@ export function writeLocalFile(baseDir: string, filePath: string, content: strin
     process.stderr.write(`mysecond: skipped suspicious path: ${filePath}\n`);
     return false;
   }
-  const dir = dirname(safe);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  // mkdirSync({ recursive: true }) is a no-op if the directory exists; the
+  // existsSync pre-check was redundant.
+  mkdirSync(dirname(safe), { recursive: true });
   writeFileSync(safe, content);
   return true;
 }
@@ -76,9 +80,10 @@ export function deleteLocalFile(baseDir: string, filePath: string): boolean {
   } catch {
     return false;
   }
-  // Clean up empty parent directories up to (but not including) baseDir.
+  // Clean up empty parent directories up to (but not including) baseDir. Use
+  // path.sep so the containment check works on Windows where sep === '\\'.
   let dir = dirname(safe);
-  while (dir !== baseDir && dir.startsWith(baseDir + '/')) {
+  while (dir !== baseDir && dir.startsWith(baseDir + sep)) {
     try {
       const entries = readdirSync(dir);
       if (entries.length > 0) break;
