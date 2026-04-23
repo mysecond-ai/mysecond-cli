@@ -74,7 +74,11 @@ function seeds(companyName: string): SeedFile[] {
 }
 
 export const step12: StepFn = async ({ ctx, shared }) => {
-  const companyName = shared.customerName ?? 'Your company';
+  // RED-TEAM R2 P0-A: companyName is now a separate shared field. v1 used
+  // shared.customerName for both PM + company; that conflation produced
+  // "for [PM] at [PM]" in the success box. step-12 doesn't need pmName but
+  // does use companyName as the README header.
+  const companyName = shared.companyName ?? 'Your company';
   for (const seed of seeds(companyName)) {
     const fullPath = join(ctx.rootDir, seed.relativePath);
     if (existsSync(fullPath)) {

@@ -27,6 +27,19 @@ export async function downloadAndVerifyTarball(
   // Stream to disk so we never hold a multi-MB plugin in RAM.
   const response = await fetch(meta.signed_url, { method: 'GET' });
   if (!response.ok) {
+    // RED-TEAM R2 P0-B: actionable copy for CDN-side rejections (NOT our
+    // server). 401/403 from a signed URL = either the URL expired mid-fetch
+    // (slow connection, signed-URL TTL is 5 min — see §0 Decision 0-C) OR a
+    // corporate firewall is blocking the object-storage CDN hostname. Both
+    // need different customer guidance than "check internet." Preserve
+    // subCode='network' so step 9's last-known-good fallback still fires.
+    if (response.status === 401 || response.status === 403) {
+      throw new MysecondError(
+        6,
+        `Couldn't download your PM OS plugin (HTTP ${response.status} from CDN). Most likely: the signed URL expired during download (slow connection) OR your network blocks Supabase Storage / S3. Try: re-run \`mysecond init\`. If on corporate WiFi, ask IT to allowlist *.mysecond.ai and your Supabase Storage region. Cached version available? Falling back automatically.`,
+        { subCode: 'network' }
+      );
+    }
     throw MysecondError.networkUnreachable(
       `signed-URL fetch returned HTTP ${response.status}`
     );

@@ -4,6 +4,7 @@
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { emitTelemetry } from './api.js';
 import { SIGINT_MESSAGE } from './copy.js';
 import type { CommandContext } from './context.js';
 import { MysecondError } from './errors.js';
@@ -39,10 +40,20 @@ export async function runInit(ctx: CommandContext): Promise<number> {
   // SIGINT handler (§6.7). Critical correctness invariant: do NOT append
   // currently-in-flight step to ledger. Print copy + exit 130.
   let sigintFired = false;
+  let currentStepNumber = 0;
   const onSigint = (): void => {
     if (sigintFired) return;
     sigintFired = true;
     process.stderr.write('\n' + SIGINT_MESSAGE + '\n');
+    // RED-TEAM R2 P1-D: telemetry on SIGINT so support can see abandonment
+    // patterns (e.g., always at step 9 = signed-URL fetch is hanging on slow
+    // networks). Fire-and-forget; process.exit will likely cut it short, but
+    // the request is queued before exit.
+    void emitTelemetry(ctx, 'mysecond.init.abandoned_at_step_N', {
+      customer_id: state.customerId ?? 'unknown',
+      step_number: currentStepNumber,
+      exit_code: 130,
+    });
     // Stale tmp will be cleaned on next run by cleanupStaleTmps above. Don't
     // try to do it here — the in-flight step may still be writing, racing the
     // cleanup is worse than letting the next-run cleanup handle it.
@@ -76,6 +87,8 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       if (!ctx.silent) {
         process.stdout.write(`step ${entry.number}/13: ${entry.description}…\n`);
       }
+      // RED-TEAM R2 P1-D: track current step for SIGINT telemetry above.
+      currentStepNumber = entry.number;
       const result = await entry.fn(sctx);
 
       if (result.message !== undefined && !ctx.silent) {

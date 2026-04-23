@@ -18,7 +18,7 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { pluginTarball } from '../api.js';
+import { emitTelemetry, pluginTarball } from '../api.js';
 import { atomicRenameDir } from '../atomic-write.js';
 import { staleCacheBanner } from '../copy.js';
 import { MysecondError } from '../errors.js';
@@ -63,6 +63,12 @@ export const step9: StepFn = async ({ ctx, state, shared }) => {
 
   // Auth-thrash circuit breaker check BEFORE doing anything.
   if (state.step9Auth401RetryCount >= AUTH_THRASH_THRESHOLD) {
+    // RED-TEAM R2 P1-D: emit telemetry before throw so support can see this
+    // even when the customer doesn't email. Fire-and-forget; never blocks.
+    void emitTelemetry(ctx, 'mysecond.init.auth_thrash_detected', {
+      customer_id: state.customerId ?? 'unknown',
+      retry_count: state.step9Auth401RetryCount,
+    });
     throw MysecondError.authThrashCircuit(state.step9Auth401RetryCount);
   }
 
@@ -106,6 +112,13 @@ async function doStep9(
         // both served from cache, then 1 more 401 → exit 8 forever.
         state.step9Auth401RetryCount = 0;
         writeSyncState(ctx.rootDir, state);
+        // RED-TEAM R2 P1-D: telemetry for ops visibility into LKG usage.
+        void emitTelemetry(ctx, 'mysecond.init.last_known_good_used', {
+          customer_id: state.customerId ?? 'unknown',
+          cached_version: fallback.version,
+          cached_age_hours: fallback.cachedAgeHours,
+          fallback_reason: 'signed_url_fetch_network_error',
+        });
         if (!ctx.silent) {
           process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
         }
@@ -145,6 +158,13 @@ async function doStep9(
           // RED-TEAM P0-1: reset counter on LKG fallback success (see above).
           state.step9Auth401RetryCount = 0;
           writeSyncState(ctx.rootDir, state);
+          // RED-TEAM R2 P1-D: telemetry for SHA-mismatch fallback path.
+          void emitTelemetry(ctx, 'mysecond.init.last_known_good_used', {
+            customer_id: state.customerId ?? 'unknown',
+            cached_version: fallback.version,
+            cached_age_hours: fallback.cachedAgeHours,
+            fallback_reason: 'tarball_sha_mismatch_or_extract_error',
+          });
           if (!ctx.silent) {
             process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
           }
@@ -178,6 +198,20 @@ async function doStep9(
   // atomicRenameDir handles non-empty destination cross-platform via rm+rename.
   atomicRenameDir(tmpMarketplaceDir, marketplaceDir(slug));
 
+  // RED-TEAM R2 P0-D: stale-state recovery. If the customer previously ran
+  // init successfully and then `rm -rf ~/.mysecond` (manual cleanup, disk
+  // sweep, syncthing flap), Claude Code's user-settings still has the
+  // marketplace registered pointing at the now-missing dir. `claude plugin
+  // marketplace add` against the same name without first removing produces
+  // undefined behavior per docs (no documented re-add-reconciles guarantee).
+  // Idempotency pattern: remove first (best-effort, swallow non-zero), then
+  // add. Covers both first-install (remove is no-op) and stale-pointer cases.
+  spawnSync(
+    'claude',
+    ['plugin', 'marketplace', 'remove', marketplaceName(slug), '--scope', 'user'],
+    { stdio: 'pipe' }
+  );
+
   // Sub-step (f): claude plugin marketplace add + claude plugin install.
   // Both verified non-interactive on Ron's Mac 2026-04-22 (DV-1).
   const addResult = spawnSync(
@@ -185,6 +219,17 @@ async function doStep9(
     ['plugin', 'marketplace', 'add', marketplaceDir(slug), '--scope', 'user'],
     { stdio: ctx.silent ? 'pipe' : 'inherit' }
   );
+  // RED-TEAM R2 P1-A: ENOENT detection. spawnSync returns status:null +
+  // error.code='ENOENT' when the binary isn't on PATH (nvm + fish, login vs
+  // non-login shell, custom PATH ordering). Without this check, we'd report
+  // "exit null" which is meaningless to a customer and routes the failure
+  // through the LKG fallback path (which also can't find claude).
+  if (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new MysecondError(
+      6,
+      "Cannot find 'claude' binary on PATH. Make sure Claude Code is installed and `which claude` resolves in this terminal. If you use nvm + a non-bash shell, try: `npm install -g @mysecond/cli` from the same shell where `which claude` works."
+    );
+  }
   if (addResult.status !== 0) {
     // Try last-known-good fallback if marketplace add fails (e.g., Claude Code
     // version mismatch or transient marketplace state).
@@ -195,14 +240,22 @@ async function doStep9(
       // RED-TEAM P0-1: reset counter on LKG fallback success.
       state.step9Auth401RetryCount = 0;
       writeSyncState(ctx.rootDir, state);
+      // RED-TEAM R2 P1-D: telemetry for marketplace-add-failure fallback path.
+      void emitTelemetry(ctx, 'mysecond.init.last_known_good_used', {
+        customer_id: state.customerId ?? 'unknown',
+        cached_version: fallback.version,
+        cached_age_hours: fallback.cachedAgeHours,
+        fallback_reason: 'claude_marketplace_add_failed',
+      });
       if (!ctx.silent) {
         process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
       }
       return { step: 9, outcome: { kind: 'completed' } };
     }
+    const exitDisplay = addResult.status ?? 'ENOENT';
     throw new MysecondError(
       6,
-      `claude plugin marketplace add failed (exit ${addResult.status}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
+      `claude plugin marketplace add failed (exit ${exitDisplay}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
     );
   }
 
@@ -211,10 +264,20 @@ async function doStep9(
     ['plugin', 'install', pluginInstallSpec(slug), '--scope', 'user'],
     { stdio: ctx.silent ? 'pipe' : 'inherit' }
   );
-  if (installResult.status !== 0) {
+  // RED-TEAM R2 P1-A: ENOENT detection (same as marketplace add above).
+  if (installResult.error !== undefined && (installResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
     throw new MysecondError(
       6,
-      `claude plugin install ${pluginInstallSpec(slug)} failed (exit ${installResult.status}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
+      "Cannot find 'claude' binary on PATH (between marketplace add + plugin install). Re-run `mysecond init` from the same shell where `which claude` works."
+    );
+  }
+  if (installResult.status !== 0) {
+    // RED-TEAM R2 P1-A: surface the actual exit value (could be null on
+    // ENOENT-during-execution, vs the early ENOENT branch above).
+    const exitDisplay = installResult.status ?? 'ENOENT';
+    throw new MysecondError(
+      6,
+      `claude plugin install ${pluginInstallSpec(slug)} failed (exit ${exitDisplay}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
     );
   }
 

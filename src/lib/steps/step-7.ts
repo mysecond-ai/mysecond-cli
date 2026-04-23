@@ -18,13 +18,11 @@ import type { StepFn } from './types.js';
 
 export const step7: StepFn = async ({ ctx, shared }) => {
   const claudeMdPath = projectPaths(ctx.rootDir).claudeMdPath;
-  const companyName = shared.customerName ?? 'your company';
-  const pmName = shared.customerName ?? 'you';
-  // Note: spec calls for {pm_name} + {company_name} as separate fields;
-  // until install-ready response carries both, we use customer_name as the PM
-  // name and fall back. v1.5 server contract: install-ready returns both
-  // fields when available (pm_name + company_name). Future-proof: read both
-  // if present, fall back gracefully.
+  // RED-TEAM R2 P1-C: pmName + companyName are SEPARATE fields populated by
+  // step 4. Conflating them as v1.4 did wrote "for [PM] at [PM]" into the
+  // customer's CLAUDE.md, persisted across every session.
+  const companyName = shared.companyName ?? 'your company';
+  const pmName = shared.pmName ?? 'you';
   const block = claudeMdBlock(companyName, pmName);
   const markedBlock = `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}`;
 

@@ -52,8 +52,26 @@ export const step4: StepFn = async ({ ctx, state, shared }) => {
       shared.customerId = response.customer_id;
       state.customerId = response.customer_id;
     }
-    if ('customer_name' in response && response.customer_name !== undefined) {
-      shared.customerName = response.customer_name;
+    // RED-TEAM R2 P0-A: thread pm_name + company_name SEPARATELY. Server
+    // contract: both fields independently optional. Fallback chain:
+    //   pmName      <- response.pm_name      || response.customer_name (v1.4 alias)
+    //   companyName <- response.company_name || response.customer_name (v1.4 alias)
+    // If neither is set, downstream copy uses generic "you" / "your company".
+    const responseAny = response as { pm_name?: string; company_name?: string; customer_name?: string };
+    if (responseAny.pm_name !== undefined && responseAny.pm_name !== '') {
+      shared.pmName = responseAny.pm_name;
+    } else if (responseAny.customer_name !== undefined && responseAny.customer_name !== '') {
+      shared.pmName = responseAny.customer_name;
+    }
+    if (responseAny.company_name !== undefined && responseAny.company_name !== '') {
+      shared.companyName = responseAny.company_name;
+    } else if (responseAny.customer_name !== undefined && responseAny.customer_name !== '') {
+      // Last-resort: if server only sent customer_name (v1.4 contract),
+      // we don't have a real company name. Use customer_name as a poor-man's
+      // fallback rather than printing "your company" — at least the customer
+      // sees their own name twice instead of generic copy. UX call: this is
+      // documented in the spec as a known v1.4-back-compat behavior.
+      shared.companyName = responseAny.customer_name;
     }
     if ('workspace_scope' in response && response.workspace_scope !== undefined) {
       shared.workspaceScope = response.workspace_scope;

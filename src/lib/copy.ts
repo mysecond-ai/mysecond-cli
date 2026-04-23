@@ -92,6 +92,11 @@ export function successBox(pmName: string, companyName: string): string {
   const company = truncate(companyName, 18);
   const top = '┌' + '─'.repeat(BOX_WIDTH - 2) + '┐';
   const bottom = '└' + '─'.repeat(BOX_WIDTH - 2) + '┘';
+  // RED-TEAM R2 P0-C: skills are namespaced by plugin name in Claude Code
+  // (`/<plugin-name>:<skill>`). If the customer has any other marketplace
+  // shipping a `pm-os` plugin OR their own project-level `prd-generator`
+  // skill, bare `/prd-generator` collides and routes elsewhere. Prefix with
+  // `/pm-os:` so the success box advertises the canonical namespaced form.
   const lines = [
     top,
     padBoxLine('  mySecond PM OS installed                       '),
@@ -103,10 +108,10 @@ export function successBox(pmName: string, companyName: string): string {
     padBoxLine('  next session start.                            '),
     padBoxLine('                                                 '),
     padBoxLine('  After reopening, try:                          '),
-    padBoxLine('   /prd-generator  (draft a PRD)                 '),
-    padBoxLine('   /skills         (see everything available)    '),
-    padBoxLine('   /enhance-context (upload interview notes,     '),
-    padBoxLine('                    research, or strategy docs)  '),
+    padBoxLine('   /pm-os:prd-generator  (draft a PRD)           '),
+    padBoxLine('   /pm-os:skills (see everything available)      '),
+    padBoxLine('   /pm-os:enhance-context (upload research,      '),
+    padBoxLine('                    interview notes, strategy)   '),
     padBoxLine('  Or just start chatting — your PM context will  '),
     padBoxLine('  be in the conversation.                        '),
     padBoxLine('                                                 '),

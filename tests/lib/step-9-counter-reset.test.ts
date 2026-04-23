@@ -42,12 +42,13 @@ describe('RED-TEAM P0-1: step9 resets auth-thrash counter on LKG fallback', () =
     expect(matches.length).toBeGreaterThanOrEqual(4);
   });
 
-  it('every fallback return path has RED-TEAM P0-1 reset within 600 chars before staleCacheBanner', () => {
-    // Each fallback success block: counter-reset + writeSyncState + (optional
-    // banner print) + return outcome:completed. We match the full ~10-line
-    // block from `fallback !== null` through the return statement.
+  it('every fallback success block contains RED-TEAM P0-1 reset', () => {
+    // R2 telemetry calls landed between the counter-reset and the
+    // staleCacheBanner, so the original tighter window (600 chars) no longer
+    // captures the reset. Widen the window to cover the full ~25-line
+    // fallback success block from `fallback !== null` through the return.
     const fallbackReturns = source.match(
-      /fallback[\s\S]{0,600}?staleCacheBanner[\s\S]{0,200}?return \{ step: 9, outcome: \{ kind: 'completed' \} \};/g
+      /fallback !== null[\s\S]{0,1200}?return \{ step: 9, outcome: \{ kind: 'completed' \} \};/g
     ) ?? [];
 
     // 3 fallback return blocks (per the 3 paths above). Each must contain

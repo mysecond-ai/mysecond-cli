@@ -145,6 +145,12 @@ export interface InstallReadyReady {
   version: string;
   install_command: string;
   customer_id: string;
+  // RED-TEAM R2 P0-A: pm_name + company_name are SEPARATE server fields.
+  // `customer_name` was the v1.4 conflated alias and is retained for back-
+  // compat — server may still send it, in which case CLI uses it for both
+  // pmName and companyName as a fallback (better than empty).
+  pm_name?: string;
+  company_name?: string;
   customer_name?: string;
   workspace_scope?: 'solo' | 'team';
   customer_slug?: string;
@@ -164,6 +170,8 @@ export interface InstallReadyPending {
   status: InstallReadyStatus;
   estimated_wait_seconds: number | null;
   customer_id: string;
+  pm_name?: string;
+  company_name?: string;
   customer_name?: string;
   workspace_scope?: 'solo' | 'team';
   customer_slug?: string;
@@ -227,4 +235,36 @@ export async function pluginTarball(ctx: CommandContext, slug: string): Promise<
     throw new MysecondError(1, '/plugin-tarball returned malformed response (missing signed_url/sha256/version)');
   }
   return meta;
+}
+
+// RED-TEAM R2 P1-D: telemetry stub. PR 4c originally wired ZERO of the spec-
+// mandated PostHog events (last_known_good_used, auth_thrash_detected,
+// rollback_pause.hit, abandoned_at_step_N, env_var_conflict, etc.). When
+// customer 23 emails "init failed", we'd have NO server-side evidence. This
+// stub posts {event, properties} to /api/companion/telemetry as fire-and-
+// forget — server can be a no-op initially. Failure is silently swallowed
+// (telemetry must NEVER break the install flow).
+//
+// Wired sites in PR 4c (4 highest-value):
+//   - mysecond.init.last_known_good_used  → step-9 fallback success
+//   - mysecond.init.auth_thrash_detected   → step-9 circuit breaker trip
+//   - mysecond.rollback_pause.hit          → companionFetch halt-header above
+//   - mysecond.init.abandoned_at_step_N    → init-runner SIGINT handler
+//
+// More events land in v1.5.1 patch fold (env_var_conflict, env_proxy_detected,
+// claude_md.unclosed_fence_detected, support.transport_question_asked).
+export async function emitTelemetry(
+  ctx: CommandContext,
+  event: string,
+  properties: Record<string, unknown> = {}
+): Promise<void> {
+  try {
+    await companionFetch(ctx, '/api/companion/telemetry', {
+      method: 'POST',
+      body: { event, properties, ts: new Date().toISOString() },
+      timeoutMs: 3_000, // short — never block install on telemetry
+    });
+  } catch {
+    // Silently swallow. Telemetry failures must NEVER surface to the customer.
+  }
 }

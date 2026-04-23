@@ -15,7 +15,11 @@ export interface StepContext {
   shared: {
     // Step 4 populates these from /install-ready response.
     customerId?: string;
-    customerName?: string;
+    // RED-TEAM R2 P0-A: pmName + companyName MUST be separate fields. The
+    // first version of this code conflated them under `customerName`, which
+    // produced "for [PM] at [PM]" in the success box for every customer.
+    pmName?: string;
+    companyName?: string;
     customerSlug?: string;
     workspaceScope?: 'solo' | 'team';
     // Step 9 populates these from /plugin-tarball + extraction.

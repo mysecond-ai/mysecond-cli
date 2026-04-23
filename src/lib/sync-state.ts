@@ -1,8 +1,9 @@
 // .claude/sync-state.json — read/write the local sync ledger.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import { atomicWriteFile } from './atomic-write.js';
 import { projectPaths } from './files.js';
 
 export interface SyncStateFileEntry {
@@ -90,7 +91,13 @@ export function isStepComplete(state: SyncState, step: number): boolean {
 
 export function writeSyncState(rootDir: string, state: SyncState): void {
   const path = projectPaths(rootDir).syncStatePath;
+  // RED-TEAM R2 P1-B: atomicWriteFile (temp + rename) replaces direct
+  // writeFileSync. Without this, a disk-full event mid-write or a SIGKILL
+  // truncates sync-state.json — readSyncState then swallows the parse error
+  // and returns EMPTY_STATE, silently losing customerSlug/customerId/ledger.
+  // Customer's next init starts from step 1 and may fail at "Missing customer
+  // slug" if env var was only set in the original install command's process.
   // mkdirSync recursive is a no-op if the directory exists.
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(state, null, 2) + '\n');
+  atomicWriteFile(path, JSON.stringify(state, null, 2) + '\n');
 }
