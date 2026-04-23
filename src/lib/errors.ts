@@ -89,6 +89,22 @@ export class MysecondError extends Error {
     );
   }
 
+  static claudeCodeTooOld(actualVersion: string, requiredVersion: string): MysecondError {
+    return new MysecondError(
+      5,
+      `mysecond requires Claude Code ${requiredVersion} or newer — you're on ${actualVersion}. Update Claude Code (Claude Code → About → Check for Updates), restart, then re-run mysecond init.`,
+      { subCode: 'claude_code_too_old' }
+    );
+  }
+
+  static claudeCodeNotDetected(): MysecondError {
+    return new MysecondError(
+      5,
+      `mysecond could not run 'claude --version'. Make sure Claude Code is installed + current, then quit + relaunch Claude Code so the paste command runs inside its bash tool (not a plain terminal).`,
+      { subCode: 'claude_code_too_old' }
+    );
+  }
+
   static authThrashCircuit(retryCount: number): MysecondError {
     return new MysecondError(
       8,
