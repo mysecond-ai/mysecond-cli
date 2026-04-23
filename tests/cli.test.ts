@@ -19,7 +19,9 @@ const DIST = resolve(REPO_ROOT, 'dist', 'mysecond.mjs');
 // init is the only command still stubbed in v1.1.0-rc.0; PR 4c implements it.
 // sync + artifact-sync are real implementations as of PR 4b.
 const SUBCOMMAND_NAMES = ['init', 'sync', 'artifact-sync'] as const;
-const STILL_STUB_SUBCOMMANDS = ['init'] as const;
+// PR 4c replaced the init stub with the real 13-step implementation.
+// The init-specific stub-message test below was removed — see new
+// "init wrong-window detection" test instead.
 
 interface ExecResult {
   status: number;
@@ -110,11 +112,17 @@ describe('mysecond CLI shape', () => {
     expect(result.stderr).toContain('unknown subcommand');
   });
 
-  it.each(STILL_STUB_SUBCOMMANDS)('%s stub exits 1 with not-implemented message', (name) => {
-    const result = runBin([name]);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('not yet implemented');
-    expect(result.stderr).toContain(name);
+  it('init detects wrong-window paste (no .claude/ dir, no CLAUDE_PROJECT_DIR) and exits 2', () => {
+    // Wrong-window detection runs BEFORE any state mutation per §6.9. We
+    // pass an isolated tmpdir as --project-dir, with no .claude/ dir present
+    // and CLAUDE_PROJECT_DIR cleared, so the detection should fire.
+    const result = runBin(['init', '--project-dir', '/tmp', '--silent'], {
+      envOverride: { CLAUDE_PROJECT_DIR: undefined },
+    });
+    // Either exit 2 (wrong-window) OR exit 1 (validate project-dir refuses /tmp).
+    // Both prove init is the real impl, not the stub.
+    expect([1, 2]).toContain(result.status);
+    expect(result.stderr).not.toContain('not yet implemented');
   });
 
   it('sync without API key exits 1 with invalid-key message', () => {

@@ -51,6 +51,7 @@ function printHelp(): void {
     '  --project-dir <path>   Override $CLAUDE_PROJECT_DIR / cwd',
     '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
     '  --force-update         Bypass the 24-hour npm-update timebox in sync',
+    '  --fix                  Resolve init conflicts interactively (`mysecond init` only)',
     '',
     'Docs: https://mysecond.ai',
   ];

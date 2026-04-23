@@ -15,6 +15,7 @@ export interface CommandContext {
   silent: boolean;
   dryRun: boolean;
   forceUpdate: boolean;
+  fix: boolean;
   strategy: ConflictStrategy;
 }
 
@@ -24,6 +25,7 @@ export interface ParsedFlags {
   silent: boolean;
   dryRun: boolean;
   forceUpdate: boolean;
+  fix: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -37,6 +39,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     silent: false,
     dryRun: false,
     forceUpdate: false,
+    fix: false,
     strategy: null,
     positional: [],
   };
@@ -49,6 +52,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.dryRun = true;
     } else if (arg === '--force-update') {
       out.forceUpdate = true;
+    } else if (arg === '--fix') {
+      out.fix = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -118,6 +123,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     silent: flags.silent,
     dryRun: flags.dryRun,
     forceUpdate: flags.forceUpdate,
+    fix: flags.fix,
     strategy,
   };
 }
