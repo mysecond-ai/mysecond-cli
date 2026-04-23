@@ -73,11 +73,14 @@ export function coupledAtomicWrite(
     const t = tmps[i];
     if (t === undefined) continue;
     renameSync(t.tmpPath, t.finalPath);
+    // RED-TEAM P1-2: gate the test-only spin-wait on NODE_ENV so a forgotten
+    // test reset can't stall the production binary. The delay only fires in
+    // test env even if the variable is mutated.
     if (
+      process.env.NODE_ENV === 'test' &&
       __injectableDelayBetweenRenames > 0 &&
       i < tmps.length - 1
     ) {
-      // Spin-wait — Atomics.wait would be cleaner but only in worker context.
       const until = Date.now() + __injectableDelayBetweenRenames;
       while (Date.now() < until) {
         // intentional busy-wait for test determinism

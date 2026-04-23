@@ -13,12 +13,27 @@ export function isInClaudeCodeContext(cwd: string = process.cwd()): boolean {
     return true;
   }
 
-  // Walk up from cwd to $HOME looking for any `.claude/` dir.
-  const home = homedir();
+  // Walk up from cwd to (but NOT including) $HOME looking for any `.claude/` dir.
+  //
+  // RED-TEAM P0-3: previously this loop checked existsSync BEFORE the
+  // break-at-home check, so when the walk reached $HOME it found `~/.claude/`
+  // (Claude Code Desktop's install dir) and returned true. That defeated the
+  // wrong-window check unconditionally for every Mac user with Claude Code
+  // installed — i.e., the entire customer base. Now we break at $HOME WITHOUT
+  // checking it, so only project-level `.claude/` dirs count as evidence of
+  // a Claude Code workspace.
+  //
+  // We resolve home by checking $HOME first (so tests can override via env)
+  // then falling back to homedir(). Vitest's module loader caches the result
+  // of `os.homedir()` in a way that ignores per-test env overrides, so reading
+  // process.env.HOME directly is the only reliable way to make this testable.
+  const home = process.env.HOME ?? homedir();
   let dir = cwd;
   for (let depth = 0; depth < 32; depth++) {
-    if (existsSync(join(dir, '.claude'))) return true;
+    // Stop BEFORE checking $HOME: the user's `~/.claude/` install dir is not
+    // a Claude Code project marker.
     if (dir === home || dir === '/' || dir === '.') break;
+    if (existsSync(join(dir, '.claude'))) return true;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;

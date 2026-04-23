@@ -36,6 +36,7 @@ import {
   marketplaceTmpJsonPath,
   pluginInstallSpec,
   pluginTmpExtractDir,
+  validateSlug,
 } from '../mysecond-paths.js';
 import { fetchAndExtractPlugin } from '../plugin-tarball.js';
 import { probeLayerOne } from '../plugin-load-detect.js';
@@ -46,9 +47,18 @@ import type { StepFn } from './types.js';
 const AUTH_THRASH_THRESHOLD = 3;
 
 export const step9: StepFn = async ({ ctx, state, shared }) => {
-  const slug = shared.customerSlug ?? state.customerSlug;
-  if (slug === null || slug === undefined || slug === '') {
+  const rawSlug = shared.customerSlug ?? state.customerSlug;
+  if (rawSlug === null || rawSlug === undefined || rawSlug === '') {
     throw new MysecondError(1, 'Step 9: missing customer slug (step 4 should have populated this).');
+  }
+  // RED-TEAM P0-2: defense-in-depth — re-validate at the path-construction
+  // boundary in case the slug came from a sync-state.json written before the
+  // step-4 validate landed (back-compat with prior installs).
+  let slug: string;
+  try {
+    slug = validateSlug(rawSlug);
+  } catch (err) {
+    throw new MysecondError(1, err instanceof Error ? err.message : String(err));
   }
 
   // Auth-thrash circuit breaker check BEFORE doing anything.
@@ -91,6 +101,11 @@ async function doStep9(
       if (fallback !== null) {
         shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
         shared.pluginVersion = fallback.version;
+        // RED-TEAM P0-1: reset counter on ANY successful step 9 completion,
+        // including LKG fallback. Without this, customer hits 2 transient 401s,
+        // both served from cache, then 1 more 401 → exit 8 forever.
+        state.step9Auth401RetryCount = 0;
+        writeSyncState(ctx.rootDir, state);
         if (!ctx.silent) {
           process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
         }
@@ -127,6 +142,9 @@ async function doStep9(
         if (fallback !== null && err instanceof MysecondError && err.subCode === 'network') {
           shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
           shared.pluginVersion = fallback.version;
+          // RED-TEAM P0-1: reset counter on LKG fallback success (see above).
+          state.step9Auth401RetryCount = 0;
+          writeSyncState(ctx.rootDir, state);
           if (!ctx.silent) {
             process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
           }
@@ -174,6 +192,9 @@ async function doStep9(
     if (fallback !== null) {
       shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
       shared.pluginVersion = fallback.version;
+      // RED-TEAM P0-1: reset counter on LKG fallback success.
+      state.step9Auth401RetryCount = 0;
+      writeSyncState(ctx.rootDir, state);
       if (!ctx.silent) {
         process.stdout.write(staleCacheBanner(fallback.cachedAgeHours) + '\n');
       }

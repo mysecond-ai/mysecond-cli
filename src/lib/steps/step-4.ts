@@ -8,6 +8,7 @@ import { installReady } from '../api.js';
 import { STATUS_COPY, midPollCopy } from '../copy.js';
 import { MysecondError } from '../errors.js';
 import { purgeLastKnownGood } from '../last-known-good.js';
+import { validateSlug } from '../mysecond-paths.js';
 
 import type { StepFn } from './types.js';
 
@@ -23,12 +24,21 @@ export const step4: StepFn = async ({ ctx, state, shared }) => {
   // from a prior `mysecond setup`. PR 4c bootstrap: read from
   // process.env.MYSECOND_CUSTOMER_SLUG, fall back to an early /api lookup.
   // For v1 we require the env var (provisioned by activate/complete page).
-  const slug = process.env.MYSECOND_CUSTOMER_SLUG ?? state.customerSlug;
-  if (slug === null || slug === undefined || slug === '') {
+  const rawSlug = process.env.MYSECOND_CUSTOMER_SLUG ?? state.customerSlug;
+  if (rawSlug === null || rawSlug === undefined || rawSlug === '') {
     throw new MysecondError(
       1,
       'Missing customer slug. The mysecond.ai/activate/complete page should have provided MYSECOND_CUSTOMER_SLUG. Re-paste the install command or contact support@mysecond.ai.'
     );
+  }
+  // RED-TEAM P0-2: validate slug format BEFORE any filesystem path uses it.
+  // A server-controlled slug like `../../etc` would otherwise traverse out
+  // of ~/.mysecond/marketplaces/ in step 9.
+  let slug: string;
+  try {
+    slug = validateSlug(rawSlug);
+  } catch (err) {
+    throw new MysecondError(1, err instanceof Error ? err.message : String(err));
   }
 
   const start = Date.now();

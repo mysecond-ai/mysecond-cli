@@ -4,9 +4,10 @@
 // failure with cache present, fall back to cached version, emit telemetry,
 // print stale-cache banner, exit 0.
 
-import { cpSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import {
   lastKnownGoodCustomerRoot,
@@ -14,12 +15,52 @@ import {
   lastKnownGoodVersionDir,
 } from './mysecond-paths.js';
 
+// RED-TEAM P1-3: tree-fingerprint helper. Hash a canonical (path, size) list
+// of every file in a cached tree to detect corruption / replacement on read.
+// We don't hash file contents — that's prohibitively slow for a 100+ file
+// plugin tree on every step-9 fallback. (path, size) catches the realistic
+// attack surface: someone deletes/adds files or truncates them; partial
+// content tampering inside an existing file would slip through but requires
+// a much more capable adversary already inside the user's machine.
+function fingerprintTree(rootDir: string): string {
+  if (!existsSync(rootDir)) return '';
+  const entries: string[] = [];
+  function walk(dir: string, relBase: string): void {
+    let names: string[];
+    try {
+      names = readdirSync(dir).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const full = join(dir, name);
+      const rel = relBase === '' ? name : `${relBase}/${name}`;
+      let s;
+      try {
+        s = statSync(full);
+      } catch {
+        continue;
+      }
+      if (s.isDirectory()) {
+        walk(full, rel);
+      } else if (s.isFile()) {
+        entries.push(`${rel}\t${s.size}`);
+      }
+    }
+  }
+  walk(rootDir, '');
+  return createHash('sha256').update(entries.join('\n'), 'utf8').digest('hex');
+}
+
 const MAX_CACHED_VERSIONS = 3;
 
 interface CacheEntry {
   version: string;
   cached_at: string;
   sha256: string;
+  // RED-TEAM P1-3: tree fingerprint captured at cache-write time. Re-computed
+  // on read; mismatch → treat as cache miss (corrupt or tampered).
+  tree_fingerprint: string;
 }
 
 interface CacheIndex {
@@ -76,7 +117,13 @@ export function cacheLastKnownGood(
   const existing = index[key] ?? [];
   // Remove any prior entry for this version (re-cache replaces).
   const filtered = existing.filter((e) => e.version !== version);
-  filtered.push({ version, cached_at: new Date().toISOString(), sha256 });
+  filtered.push({
+    version,
+    cached_at: new Date().toISOString(),
+    sha256,
+    // RED-TEAM P1-3: capture fingerprint of the just-written tree.
+    tree_fingerprint: fingerprintTree(destDir),
+  });
 
   // Evict oldest by `cached_at` if over limit.
   filtered.sort((a, b) => a.cached_at.localeCompare(b.cached_at));
@@ -116,6 +163,17 @@ export function findLastKnownGood(slug: string): LastKnownGoodHit | null {
   if (!existsSync(sourceDir)) {
     // Index entry orphaned — cache dir was manually deleted. Treat as miss.
     return null;
+  }
+
+  // RED-TEAM P1-3: re-fingerprint the on-disk tree and compare against the
+  // index entry. Mismatch → treat as miss (corrupt or tampered cache).
+  // Older entries without `tree_fingerprint` (pre-P1-3 caches) are accepted
+  // for back-compat — they re-fingerprint on next cache write.
+  if (newest.tree_fingerprint !== undefined && newest.tree_fingerprint !== '') {
+    const actual = fingerprintTree(sourceDir);
+    if (actual !== newest.tree_fingerprint) {
+      return null;
+    }
   }
 
   const ageMs = Date.now() - new Date(newest.cached_at).getTime();

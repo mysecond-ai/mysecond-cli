@@ -96,6 +96,30 @@ export function installedPluginCacheParent(slug: string): string {
   return join(homedir(), '.claude', 'plugins', 'cache', marketplaceName(slug), 'pm-os');
 }
 
+// Slug-format guard (RED-TEAM P0-2). The slug arrives from server responses
+// and is interpolated into filesystem paths via marketplaceDir / cache paths.
+// Without validation, a server-controlled slug like `../../etc` resolves to
+// arbitrary directories — atomicRenameDir would `rmSync` them. Slug must
+// match the same character class enforced server-side per EDD §1.4 invariant 1
+// (`^[a-z][a-z0-9-]*[a-z0-9]$`). We're permissive on length (<=64) and allow
+// uppercase + underscore for forward-compat; spec is the floor, not the ceiling.
+const SLUG_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export function validateSlug(slug: unknown): string {
+  if (typeof slug !== 'string') {
+    throw new Error(`Invalid customer slug: not a string (got ${typeof slug})`);
+  }
+  if (!SLUG_PATTERN.test(slug)) {
+    // Don't echo the slug verbatim in case it contains shell metachars or
+    // path-traversal sequences that could land in a downstream log message.
+    // Length + pattern hint is enough for support to debug.
+    throw new Error(
+      `Invalid customer slug format (length=${slug.length}, expected ${SLUG_PATTERN.source}). Contact support@mysecond.ai.`
+    );
+  }
+  return slug;
+}
+
 // Project-dir guard (§6.1) — refuse paths that would let us trample system or
 // mysecond-managed dirs.
 const FORBIDDEN_PROJECT_DIR_PREFIXES = [
