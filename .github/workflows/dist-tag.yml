@@ -1,0 +1,94 @@
+# Manual npm dist-tag operations via workflow_dispatch.
+#
+# Referenced in PMKit/.claude/plans/solo-launch-orchestrator.md v6 §C.5.4
+# rollback lever #3. Lets Ron re-tag a published @mysecond/cli version (e.g.
+# roll `latest` back to the previous patch if v1.1.0 breaks Day-1 installs)
+# WITHOUT fighting local npm auth — NPM_TOKEN already has 2FA bypass for
+# this scope in GitHub Secrets.
+#
+# Use cases:
+#   1. Rollback: Day-1 bug in v1.1.0 → re-tag v1.0.x as `latest` (new
+#      installs get the prior good version; published 1.1.0 stays on
+#      registry unchanged, just not the default fetch target).
+#   2. Promote a prerelease: tag v1.2.0-rc.1 as `next` so opt-in testers
+#      can `npm install @mysecond/cli@next`.
+#   3. Deprecate: point `latest` back at a previous version during an
+#      emergency hotfix window.
+#
+# Trigger manually from the Actions tab:
+#   Repo → Actions → "npm dist-tag" → Run workflow
+#     version: 1.1.0        (must already be published to npm)
+#     tag:     latest        (or `next`, `beta`, etc.)
+#
+# Verify before running:
+#   npm view @mysecond/cli versions --json   # confirm the version exists
+#   npm view @mysecond/cli dist-tags         # current tag state
+
+name: npm dist-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published version to tag (e.g. 1.1.0). Must already exist on npm."
+        required: true
+        type: string
+      tag:
+        description: "Dist-tag to apply (e.g. latest, next, beta)."
+        required: true
+        type: string
+        default: latest
+
+jobs:
+  dist-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate input shape
+        # Defense-in-depth: prevent accidental command injection via the
+        # version/tag inputs. workflow_dispatch inputs are authenticated
+        # (require repo write) but a compromised Actions token could
+        # still abuse shell interpolation. Restrict to semver + simple
+        # identifier characters.
+        run: |
+          set -euo pipefail
+          VERSION='${{ inputs.version }}'
+          TAG='${{ inputs.tag }}'
+          echo "Requested: @mysecond/cli@${VERSION} -> ${TAG}"
+          # Semver-ish: digits.digits.digits + optional -prerelease / +build
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "ERROR: version '${VERSION}' is not valid semver"
+            exit 1
+          fi
+          # Dist-tag: letters/digits/hyphens only, not starting with a digit or 'v' (npm rule)
+          if [[ ! "${TAG}" =~ ^[a-zA-Z][a-zA-Z0-9-]*$ ]]; then
+            echo "ERROR: tag '${TAG}' is not a valid npm dist-tag"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify version exists on registry
+        run: |
+          set -euo pipefail
+          if ! npm view "@mysecond/cli@${{ inputs.version }}" version > /dev/null 2>&1; then
+            echo "ERROR: @mysecond/cli@${{ inputs.version }} is not published to npm"
+            echo "Run 'npm view @mysecond/cli versions' to see available versions"
+            exit 1
+          fi
+          echo "✓ @mysecond/cli@${{ inputs.version }} exists on registry"
+
+      - name: Show current dist-tags
+        run: npm view @mysecond/cli dist-tags
+
+      - name: Apply dist-tag
+        run: npm dist-tag add "@mysecond/cli@${{ inputs.version }}" "${{ inputs.tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Show dist-tags after change
+        run: npm view @mysecond/cli dist-tags
