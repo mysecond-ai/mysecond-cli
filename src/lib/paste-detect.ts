@@ -1,14 +1,46 @@
 // Wrong-window paste detection per EDD §6.9.
-// Detection: $CLAUDE_PROJECT_DIR env unset AND no `.claude/` dir in CWD or any
+// Detection: no Claude Code env signals AND no `.claude/` dir in CWD or any
 // parent up to $HOME. Customer pasted the install command into a regular
 // terminal instead of Claude Code's terminal.
+//
+// Claude Code bash sandbox env signals (empirically verified 2026-04-29):
+//   CLAUDECODE=1               — reliably set; PRIMARY signal
+//   CLAUDE_PROJECT_DIR=""      — set but to EMPTY STRING (not undefined) — do NOT use as primary
+//   CLAUDE_CODE_ACCOUNT_UUID   — documented but NOT set in bash sandbox in current CC versions
+//   CLAUDE_CODE_ENTRYPOINT     — set to "claude-desktop" in Desktop, varies in CLI
+//
+// Decision: CLAUDECODE=1 is the primary gate. The others are belt-and-suspenders.
+// CLAUDE_CODE_ACCOUNT_UUID added as a future-proof check in case Anthropic starts
+// setting it in the bash sandbox (per context/anthropic-tools.md it is documented
+// as a valid CC env var).
 
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export function isInClaudeCodeContext(cwd: string = process.cwd()): boolean {
-  // Fast path: env var set means we're already inside Claude Code.
+  // Primary: CLAUDECODE=1 — reliably set in CC's bash sandbox across all versions.
+  // This is the only signal that is (a) non-empty and (b) consistently present.
+  if (process.env.CLAUDECODE === '1') {
+    return true;
+  }
+
+  // Belt-and-suspenders: CLAUDE_CODE_ACCOUNT_UUID — documented as a CC env var
+  // (context/anthropic-tools.md). Not currently set in bash sandbox but may be
+  // in future CC versions or in non-bash execution contexts.
+  if (process.env.CLAUDE_CODE_ACCOUNT_UUID !== undefined && process.env.CLAUDE_CODE_ACCOUNT_UUID !== '') {
+    return true;
+  }
+
+  // Belt-and-suspenders: CLAUDE_CODE_ENTRYPOINT — set by CC Desktop/CLI to
+  // "claude-desktop" or similar. Not set in regular terminals.
+  if (process.env.CLAUDE_CODE_ENTRYPOINT !== undefined && process.env.CLAUDE_CODE_ENTRYPOINT !== '') {
+    return true;
+  }
+
+  // Secondary: CLAUDE_PROJECT_DIR set to a non-empty path.
+  // Note: CC sandbox sets this to "" (empty string), so empty string is NOT
+  // a valid signal — must check for non-empty explicitly.
   if (process.env.CLAUDE_PROJECT_DIR !== undefined && process.env.CLAUDE_PROJECT_DIR !== '') {
     return true;
   }
