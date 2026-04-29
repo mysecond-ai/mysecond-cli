@@ -7,22 +7,34 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const CC_ENV_VARS = ['CLAUDECODE', 'CLAUDE_PROJECT_DIR', 'CLAUDE_CODE_ACCOUNT_UUID', 'CLAUDE_CODE_ENTRYPOINT'];
+
 let fakeHome: string;
 let originalHome: string | undefined;
-let originalProjectDir: string | undefined;
+let savedCcEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   fakeHome = mkdtempSync(join(tmpdir(), 'mysecond-redteam-'));
   originalHome = process.env.HOME;
-  originalProjectDir = process.env.CLAUDE_PROJECT_DIR;
   process.env.HOME = fakeHome;
-  delete process.env.CLAUDE_PROJECT_DIR;
+  // Clear ALL Claude Code env signals so filesystem-walk tests aren't
+  // short-circuited by ambient CC env (e.g. CLAUDECODE=1 when running
+  // inside the CC bash sandbox). Also clears new belt-and-suspenders
+  // signals added in v1.1.1: CLAUDE_CODE_ACCOUNT_UUID, CLAUDE_CODE_ENTRYPOINT.
+  savedCcEnv = {};
+  for (const key of CC_ENV_VARS) {
+    savedCcEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   vi.resetModules();
 });
 
 afterEach(() => {
   if (originalHome !== undefined) process.env.HOME = originalHome;
-  if (originalProjectDir !== undefined) process.env.CLAUDE_PROJECT_DIR = originalProjectDir;
+  for (const key of CC_ENV_VARS) {
+    if (savedCcEnv[key] !== undefined) process.env[key] = savedCcEnv[key];
+    else delete process.env[key];
+  }
   rmSync(fakeHome, { recursive: true, force: true });
 });
 

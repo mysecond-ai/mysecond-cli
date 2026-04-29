@@ -3,7 +3,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
-import { cliSync, artifactsSync, confirmFirstSetup } from '../lib/api.js';
+import { cliSync, artifactsSync, confirmFirstSetup, emitTelemetry } from '../lib/api.js';
 import type { CommandContext } from '../lib/context.js';
 import { resolveConflict, type ConflictOutcome } from '../lib/conflict.js';
 import { MysecondError } from '../lib/errors.js';
@@ -207,7 +207,31 @@ export async function runSync(
   const cliSyncOpts: { timeoutMs?: number } = ctx.silent
     ? { timeoutMs: SILENT_SYNC_TIMEOUT_MS }
     : {};
-  const response = await cliSync(ctx, previousPaths, cliSyncOpts);
+
+  // CTO P1: context sync failure is partial-success, not a hard install failure.
+  // Plugin install already succeeded at this point. Warn loudly + exit 0 so
+  // the customer has a working PM OS (minus the context files), and knows to retry.
+  // CTO BLOCKING-1: emit sync_failed telemetry with HTTP status for funnel analysis.
+  let response: Awaited<ReturnType<typeof cliSync>>;
+  try {
+    response = await cliSync(ctx, previousPaths, cliSyncOpts);
+  } catch (err) {
+    const httpCode = err instanceof MysecondError ? err.exitCode : -1;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    void emitTelemetry(ctx, 'mysecond.install.sync_failed', {
+      slug: state.customerSlug ?? 'unknown',
+      http_code: httpCode,
+      error: errMsg,
+    });
+    process.stderr.write(
+      `mysecond: Context sync incomplete (${errMsg}).\n` +
+      `  Your PM OS is installed but context files are not downloaded yet.\n` +
+      `  Run \`mysecond sync\` to retry. If this persists, email hello@mysecond.ai with slug: ${state.customerSlug ?? 'unknown'}.\n`
+    );
+    // Exit 0 — partial success. Plugin is installed; only context files missing.
+    return 0;
+  }
+
   const contextFiles: ContextFile[] = response.context_files ?? response.files ?? [];
   const customSkills = response.custom_skills ?? [];
   const customAgents = response.custom_agents ?? [];

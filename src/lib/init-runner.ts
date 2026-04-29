@@ -31,6 +31,15 @@ export async function runInit(ctx: CommandContext): Promise<number> {
   // Load state (or empty defaults).
   const state = readSyncState(ctx.rootDir);
 
+  // CTO BLOCKING-1: install funnel telemetry. Fire-and-forget — never block
+  // install on telemetry. Slug may not be known yet (comes from env or step 4),
+  // so send what we have. Completed event fires after all 13 steps succeed.
+  const telemetrySlug = process.env.MYSECOND_CUSTOMER_SLUG ?? state.customerSlug ?? 'unknown';
+  void emitTelemetry(ctx, 'mysecond.install.started', {
+    slug: telemetrySlug,
+    resuming: state.initCompletedSteps !== undefined && state.initCompletedSteps.length > 0,
+  });
+
   // Stale-tmp cleanup on resume (CTO-2 + RT-1 lock-scoped — §6.2).
   // Scan ~/.mysecond/marketplaces/, .claude/sync-state.json parent dir,
   // .env parent, .claude/settings.json parent, CLAUDE.md parent for *.tmp-{pid}
@@ -112,6 +121,12 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       if (!ctx.silent) {
         process.stdout.write('\nDRY-RUN PASSED — would exit 0 on real run.\n');
       }
+    } else {
+      // CTO BLOCKING-1: emit install.completed on first-time success.
+      // Re-runs (resume from partial) still emit — server can deduplicate on slug.
+      void emitTelemetry(ctx, 'mysecond.install.completed', {
+        slug: sctx.shared.customerId ?? telemetrySlug,
+      });
     }
 
     return 0;
