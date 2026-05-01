@@ -17,9 +17,15 @@ export interface SyncStateArtifactEntry {
   pushedAt: string;
 }
 
+export interface SyncStateContextEntry {
+  hash: string;
+  pushedAt: string;
+}
+
 export interface SyncState {
   files: Record<string, SyncStateFileEntry>;
   artifacts: Record<string, SyncStateArtifactEntry>;
+  contextFiles: Record<string, SyncStateContextEntry>;
   lastSyncedAt: string | null;
   // EDD §5.3 — 24h npm-update timebox cache.
   lastNpmUpdateAt: string | null;
@@ -41,17 +47,20 @@ export interface SyncState {
   customerSlug: string | null;
 }
 
-const EMPTY_STATE: SyncState = {
-  files: {},
-  artifacts: {},
-  lastSyncedAt: null,
-  lastNpmUpdateAt: null,
-  initCompletedSteps: [],
-  step9Auth401RetryCount: 0,
-  customerId: null,
-  workspaceScope: null,
-  customerSlug: null,
-};
+function freshEmptyState(): SyncState {
+  return {
+    files: {},
+    artifacts: {},
+    contextFiles: {},
+    lastSyncedAt: null,
+    lastNpmUpdateAt: null,
+    initCompletedSteps: [],
+    step9Auth401RetryCount: 0,
+    customerId: null,
+    workspaceScope: null,
+    customerSlug: null,
+  };
+}
 
 export function readSyncState(rootDir: string): SyncState {
   const path = projectPaths(rootDir).syncStatePath;
@@ -59,15 +68,16 @@ export function readSyncState(rootDir: string): SyncState {
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SyncState>;
     return {
-      ...EMPTY_STATE,
+      ...freshEmptyState(),
       ...parsed,
       files: parsed.files ?? {},
       artifacts: parsed.artifacts ?? {},
+      contextFiles: parsed.contextFiles ?? {},
       initCompletedSteps: parsed.initCompletedSteps ?? [],
       step9Auth401RetryCount: parsed.step9Auth401RetryCount ?? 0,
     };
   } catch {
-    return { ...EMPTY_STATE };
+    return freshEmptyState();
   }
 }
 

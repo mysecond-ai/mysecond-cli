@@ -3,7 +3,13 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
-import { cliSync, artifactsSync, confirmFirstSetup, emitTelemetry } from '../lib/api.js';
+import {
+  cliSync,
+  artifactsSync,
+  contextFilesPush,
+  confirmFirstSetup,
+  emitTelemetry,
+} from '../lib/api.js';
 import type { CommandContext } from '../lib/context.js';
 import { resolveConflict, type ConflictOutcome } from '../lib/conflict.js';
 import { MysecondError } from '../lib/errors.js';
@@ -16,6 +22,7 @@ import {
 import { markNpmUpdated, shouldRunNpmUpdate } from '../lib/npm.js';
 import {
   scanArtifacts,
+  scanContextFiles,
   type CompanionFile,
   type ContextFile,
 } from '../lib/payload.js';
@@ -42,6 +49,7 @@ interface SyncSummary {
   agentsUpdated: number;
   workflowsUpdated: number;
   artifactsPushed: number;
+  contextFilesPushed: number;
   claudeMdUpdated: boolean;
   npmUpdateRan: boolean;
 }
@@ -60,6 +68,7 @@ function emptySummary(): SyncSummary {
     agentsUpdated: 0,
     workflowsUpdated: 0,
     artifactsPushed: 0,
+    contextFilesPushed: 0,
     claudeMdUpdated: false,
     npmUpdateRan: false,
   };
@@ -142,6 +151,27 @@ async function upSyncArtifacts(
   return result.synced;
 }
 
+async function upSyncContextFiles(
+  ctx: CommandContext,
+  state: SyncState
+): Promise<number> {
+  const files = scanContextFiles(ctx.rootDir);
+  const toSync = files.filter((f) => {
+    const last = state.contextFiles[f.file_path];
+    return !last || last.hash !== f.current_hash;
+  });
+  if (toSync.length === 0) return 0;
+
+  const result = await contextFilesPush(ctx, toSync);
+  if (result.synced > 0 || result.skipped > 0) {
+    const now = new Date().toISOString();
+    for (const f of toSync) {
+      state.contextFiles[f.file_path] = { hash: f.current_hash, pushedAt: now };
+    }
+  }
+  return result.synced;
+}
+
 function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   // CAIO finding: stderr from SessionStart hooks is silently dropped on exit 0.
   // Customer-relevant messages MUST go to stdout when ctx.silent so Claude sees
@@ -157,6 +187,7 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
     if (summary.agentsUpdated > 0) parts.push(`${summary.agentsUpdated} agents`);
     if (summary.workflowsUpdated > 0) parts.push(`${summary.workflowsUpdated} workflows`);
     if (summary.artifactsPushed > 0) parts.push(`${summary.artifactsPushed} artifacts pushed`);
+    if (summary.contextFilesPushed > 0) parts.push(`${summary.contextFilesPushed} context files pushed`);
     const conflicts =
       summary.conflictsCloudKept + summary.conflictsLocalKept + summary.conflictsSkipped;
     if (conflicts > 0) parts.push(`${conflicts} conflicts (see .claude/sync-conflicts/)`);
@@ -178,6 +209,7 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   if (summary.agentsUpdated) parts.push(`${summary.agentsUpdated} agents`);
   if (summary.workflowsUpdated) parts.push(`${summary.workflowsUpdated} workflows`);
   if (summary.artifactsPushed) parts.push(`${summary.artifactsPushed} artifacts pushed`);
+  if (summary.contextFilesPushed) parts.push(`${summary.contextFilesPushed} context files pushed`);
   if (summary.claudeMdUpdated) parts.push('CLAUDE.md updated');
   if (parts.length === 0) parts.push('nothing changed');
 
@@ -278,6 +310,16 @@ export async function runSync(
     if (!ctx.silent) {
       process.stderr.write(
         `mysecond: artifact up-sync failed (${err instanceof Error ? err.message : String(err)}). Down-sync OK.\n`
+      );
+    }
+  }
+
+  try {
+    summary.contextFilesPushed = await upSyncContextFiles(ctx, state);
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: context-file up-sync failed (${err instanceof Error ? err.message : String(err)}). Down-sync OK.\n`
       );
     }
   }
