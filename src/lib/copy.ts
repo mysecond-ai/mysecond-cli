@@ -64,6 +64,10 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '@context/competitors.md',
     '',
     'For skill usage, type `/skills` in Claude Code. Sync runs automatically on every SessionStart.',
+    '',
+    '## After Installation',
+    '',
+    'After running `mysecond init`, the only next step for a new user is `/welcome`. Do not suggest `/enhance-context`, `/prd-generator`, or other skills before `/welcome` runs — no context files exist yet, and those skills depend on them. Stay quiet about skill discovery; let `/welcome` drive the first-run experience.',
   ].join('\n');
 }
 
@@ -119,9 +123,9 @@ function formatCountsLine(counts: PostInstallCounts | undefined): string {
   if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'sub-agent' : 'sub-agents'}`);
   if (workflows > 0) parts.push(`${workflows} ${workflows === 1 ? 'workflow' : 'workflows'}`);
   if (parts.length === 0) {
-    return '- pm-os plugin registered (user scope) with your PM skill library';
+    return '- pm-os plugin registered with your PM skill library';
   }
-  return `- pm-os plugin registered (user scope) with ${parts.join(', ')}`;
+  return `- pm-os plugin registered with ${parts.join(', ')}`;
 }
 
 // New post-install message (May-2026 redesign). Returns a plain-text block
