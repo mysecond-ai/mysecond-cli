@@ -65,26 +65,27 @@ describe('RED-TEAM R2 P0-B: marketplace.json metadata block prevents stderr warn
 });
 
 // =====================================================================
-// CAIO P0-C: success box uses namespaced /pm-os:* skill names
+// May-2026 redesign: post-install message drops premature skill suggestions
+// (was CAIO P0-C, namespaced /pm-os:* names). Customer feedback in
+// launch-feedback-log: suggesting /prd-generator + /enhance-context before
+// /welcome is run is premature — there are no context files yet. Single
+// primary CTA is now `/welcome`.
 // =====================================================================
-describe('RED-TEAM R2 P0-C: success box uses namespaced skill names', () => {
+describe('post-install message: single primary CTA = /welcome', () => {
   const box = successBox('Alice', 'Acme');
 
-  it('advertises /pm-os:prd-generator (namespaced) not bare /prd-generator', () => {
-    expect(box).toContain('/pm-os:prd-generator');
-    // Critical: bare `/prd-generator` collides with any other plugin or
-    // project-level skill. Customer would type bare and get wrong routing.
-    expect(box).not.toMatch(/^[^:]\/prd-generator/m);
-    // Note: we DON'T assert "no bare /prd-generator anywhere" — the
-    // namespaced form contains the substring "prd-generator" by definition.
+  it('directs the customer to /welcome (the actual first step)', () => {
+    expect(box).toContain('/welcome');
   });
 
-  it('advertises /pm-os:skills (namespaced)', () => {
-    expect(box).toContain('/pm-os:skills');
+  it('does NOT advertise /prd-generator (premature without context files)', () => {
+    expect(box).not.toContain('/prd-generator');
+    expect(box).not.toContain('/pm-os:prd-generator');
   });
 
-  it('advertises /pm-os:enhance-context (namespaced)', () => {
-    expect(box).toContain('/pm-os:enhance-context');
+  it('does NOT advertise /enhance-context (premature before /welcome)', () => {
+    expect(box).not.toContain('/enhance-context');
+    expect(box).not.toContain('/pm-os:enhance-context');
   });
 });
 
