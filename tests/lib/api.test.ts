@@ -106,4 +106,35 @@ describe('contextFilesPush', () => {
     const result = await contextFilesPush(ctx(), [file('context/a.md', 'a')]);
     expect(result).toEqual({ synced: 0, skipped: 0, errors: [] });
   });
+
+  // Follow-up #6 — server-side rollback-pause kill switch must propagate.
+  it('throws rollbackPause (exitCode 7) when server returns X-Mysecond-Halt: 1', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"synced":0}', {
+        status: 200,
+        headers: { 'X-Mysecond-Halt': '1' },
+      })
+    );
+    await expect(
+      contextFilesPush(ctx(), [file('context/a.md', 'a')])
+    ).rejects.toMatchObject({ exitCode: 7 });
+  });
+
+  // Follow-up #7 — caller can pass timeoutMs (SessionStart hook uses 8s).
+  it('honors caller-provided timeoutMs by aborting fetch when exceeded', async () => {
+    // Slow fetch that never resolves — should be aborted by AbortSignal.timeout.
+    fetchMock.mockImplementationOnce(
+      (_url: URL, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'TimeoutError';
+            reject(err);
+          });
+        })
+    );
+    await expect(
+      contextFilesPush(ctx(), [file('context/a.md', 'a')], { timeoutMs: 50 })
+    ).rejects.toThrow(/Cannot reach mysecond\.ai/);
+  });
 });

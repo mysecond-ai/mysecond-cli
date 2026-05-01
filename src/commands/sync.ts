@@ -130,6 +130,13 @@ function mergeClaudeMdOverride(claudeMdPath: string, override: string): void {
   writeFileSync(claudeMdPath, next);
 }
 
+// Timeout opts for SessionStart-context up-syncs. Silent mode = fast-fail at
+// 8s so a slow server doesn't stall Claude Code Desktop launch. Non-silent
+// callers fall through to the 30s default in companionFetch.
+function silentSyncOpts(ctx: CommandContext): { timeoutMs?: number } {
+  return ctx.silent ? { timeoutMs: SILENT_SYNC_TIMEOUT_MS } : {};
+}
+
 async function upSyncArtifacts(
   ctx: CommandContext,
   state: SyncState
@@ -141,7 +148,7 @@ async function upSyncArtifacts(
   });
   if (toSync.length === 0) return 0;
 
-  const result = await artifactsSync(ctx, toSync);
+  const result = await artifactsSync(ctx, toSync, silentSyncOpts(ctx));
   if (result.synced > 0) {
     const now = new Date().toISOString();
     for (const a of toSync) {
@@ -162,7 +169,7 @@ async function upSyncContextFiles(
   });
   if (toSync.length === 0) return 0;
 
-  const result = await contextFilesPush(ctx, toSync);
+  const result = await contextFilesPush(ctx, toSync, silentSyncOpts(ctx));
   if (result.synced > 0 || result.skipped > 0) {
     const now = new Date().toISOString();
     for (const f of toSync) {

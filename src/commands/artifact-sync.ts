@@ -8,6 +8,7 @@ import { readFileSync, statSync } from 'node:fs';
 
 import { artifactsSync, contextFilesPush } from '../lib/api.js';
 import type { CommandContext } from '../lib/context.js';
+import { MysecondError } from '../lib/errors.js';
 import { relativeFromRoot, shortHash } from '../lib/files.js';
 import {
   CONTEXT_PER_FILE_LIMIT,
@@ -102,7 +103,11 @@ export async function runArtifactSync(
         state.contextFiles[relativePath] = { hash, pushedAt: new Date().toISOString() };
         writeSyncState(ctx.rootDir, state);
       }
-    } catch {
+    } catch (err) {
+      // Honor server-side halt header: if the server flipped the rollback-pause
+      // kill switch (exitCode 7), exit non-zero so subsequent PostToolUse events
+      // also stop. Other errors stay best-effort.
+      if (err instanceof MysecondError && err.exitCode === 7) throw err;
       // Best-effort: TODO(telemetry) emit PostHog event when telemetry lands.
     }
     return 0;
@@ -132,7 +137,10 @@ export async function runArtifactSync(
 
   try {
     await artifactsSync(ctx, [payload]);
-  } catch {
+  } catch (err) {
+    // Same halt-header propagation as the context branch above. Server kill
+    // switch must reach the PostToolUse main() catch so the hook exits non-zero.
+    if (err instanceof MysecondError && err.exitCode === 7) throw err;
     // Best-effort: TODO(telemetry) emit PostHog event when telemetry lands.
   }
   return 0;
