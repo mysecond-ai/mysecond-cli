@@ -70,54 +70,93 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
 export const CLAUDE_MD_MARKER_START = '<!-- mysecond-start -->';
 export const CLAUDE_MD_MARKER_END = '<!-- mysecond-end -->';
 
-// §6.8 framed success box (Ron-B1 v2 + v1.4 restart instruction).
-// 51 chars wide, 15 lines tall. {pm_name}+{company_name} truncated to 18 chars
-// each (CXO-11) so combined "for X at Y" fits within box width.
-const BOX_WIDTH = 51;
+// §6.8 post-install success message (May-2026 redesign per launch-feedback-log).
+// Plain-text, single primary CTA = `/welcome`. Drops premature suggestions for
+// /prd-generator + /enhance-context (customer has no context files yet).
+//
+// Inputs: {pm_name}, {company_name}, plugin counts (skills/agents/workflows).
+// All inputs are SANITIZED — see sanitizeName() — to defend against malicious
+// customer/company names from the install-ready response (HTML, ANSI escapes,
+// control chars, length blowup).
 
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + '…';
+const NAME_MAX_LEN = 40;
+
+// Sanitize an arbitrary server-provided name string for safe inclusion in the
+// success message. Strips control chars + ANSI/CSI escapes, collapses
+// whitespace, truncates. Returns the fallback if the result is empty.
+function sanitizeName(input: string | undefined | null, fallback: string): string {
+  if (input === undefined || input === null) return fallback;
+  if (typeof input !== 'string') return fallback;
+  // Strip ASCII control chars (0x00-0x1F, 0x7F) — covers \r, \n, \t, ESC (0x1B),
+  // backspace, bell, etc. ANSI/CSI escape sequences start with ESC so removing
+  // ESC neutralizes them. Also strip C1 control range (0x80-0x9F).
+  // eslint-disable-next-line no-control-regex
+  let s = input.replace(/[\x00-\x1F\x7F-\x9F]/g, "").replace(/[<>]/g, "");
+  // Collapse internal whitespace runs to single spaces; trim ends.
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length === 0) return fallback;
+  if (s.length > NAME_MAX_LEN) {
+    s = s.slice(0, NAME_MAX_LEN - 1) + '…';
+  }
+  return s;
 }
 
-function padBoxLine(content: string): string {
-  // Box interior is BOX_WIDTH - 2 (for │ on each side). Content padded to fill.
-  const interior = BOX_WIDTH - 2;
-  const trimmed = content.length > interior ? content.slice(0, interior) : content;
-  return `│${trimmed.padEnd(interior, ' ')}│`;
+export interface PostInstallCounts {
+  skills: number;
+  agents: number;
+  workflows: number;
 }
 
-export function successBox(pmName: string, companyName: string): string {
-  const pm = truncate(pmName, 18);
-  const company = truncate(companyName, 18);
-  const top = '┌' + '─'.repeat(BOX_WIDTH - 2) + '┐';
-  const bottom = '└' + '─'.repeat(BOX_WIDTH - 2) + '┘';
-  // RED-TEAM R2 P0-C: skills are namespaced by plugin name in Claude Code
-  // (`/<plugin-name>:<skill>`). If the customer has any other marketplace
-  // shipping a `pm-os` plugin OR their own project-level `prd-generator`
-  // skill, bare `/prd-generator` collides and routes elsewhere. Prefix with
-  // `/pm-os:` so the success box advertises the canonical namespaced form.
+// Build the count line, omitting zero-count categories so a partially-empty
+// plugin doesn't print "0 sub-agents". If all three are zero (extraction
+// folder unreadable), fall back to a generic phrasing.
+function formatCountsLine(counts: PostInstallCounts | undefined): string {
+  const skills = counts?.skills ?? 0;
+  const agents = counts?.agents ?? 0;
+  const workflows = counts?.workflows ?? 0;
+  const parts: string[] = [];
+  if (skills > 0) parts.push(`${skills} ${skills === 1 ? 'skill' : 'skills'}`);
+  if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'sub-agent' : 'sub-agents'}`);
+  if (workflows > 0) parts.push(`${workflows} ${workflows === 1 ? 'workflow' : 'workflows'}`);
+  if (parts.length === 0) {
+    return '- pm-os plugin registered (user scope) with your PM skill library';
+  }
+  return `- pm-os plugin registered (user scope) with ${parts.join(', ')}`;
+}
+
+// New post-install message (May-2026 redesign). Returns a plain-text block
+// (NOT a framed ASCII box). Caller adds surrounding blank lines.
+//
+// Customer feedback drove the rewrite:
+//   1. "Bring in the company name to make it feel more personal" → lead line
+//      personalizes with both pmName and companyName.
+//   2. "Improve the messaging — kick off the welcome flow OR ask me to" →
+//      single primary CTA = `/welcome` (not `/prd-generator`, which is
+//      premature without context files).
+//   3. Plugin still requires Claude Code restart to load → keep the
+//      "ALMOST THERE" technical instruction.
+export function successBox(
+  pmName: string,
+  companyName: string,
+  counts?: PostInstallCounts
+): string {
+  const pm = sanitizeName(pmName, 'you');
+  const company = sanitizeName(companyName, 'your company');
   const lines = [
-    top,
-    padBoxLine('  mySecond PM OS installed                       '),
-    padBoxLine(`  for ${pm} at ${company}`),
-    padBoxLine('                                                 '),
-    padBoxLine('  Almost there — close and reopen Claude Code    '),
-    padBoxLine('  to activate your PM OS. Your context, skills,  '),
-    padBoxLine('  and sync hooks will load automatically on the  '),
-    padBoxLine('  next session start.                            '),
-    padBoxLine('                                                 '),
-    padBoxLine('  After reopening, try:                          '),
-    padBoxLine('   /pm-os:prd-generator  (draft a PRD)           '),
-    padBoxLine('   /pm-os:skills (see everything available)      '),
-    padBoxLine('   /pm-os:enhance-context (upload research,      '),
-    padBoxLine('                    interview notes, strategy)   '),
-    padBoxLine('  Or just start chatting — your PM context will  '),
-    padBoxLine('  be in the conversation.                        '),
-    padBoxLine('                                                 '),
-    padBoxLine('  ──                                             '),
-    padBoxLine('  Syncs automatically on every session.          '),
-    bottom,
+    `✓ mySecond PM OS installed for ${pm} at ${company}`,
+    '',
+    "Here's what's now in place:",
+    formatCountsLine(counts),
+    '- Context sync hooks active for every Claude Code session',
+    '- Your context files will be created in step 2 below',
+    '',
+    'ALMOST THERE — close and reopen Claude Code to activate the plugin.',
+    '',
+    `Then run /welcome in Claude Code. It takes about 5 minutes and sets up your context files for ${company} (company, product, personas, competitors, goals).`,
+    '',
+    'After /welcome, your full skill library — PRDs, roadmaps, research syntheses, and 80+ more — knows your team and product.',
+    '',
+    'Need help? Reply at hello@mysecond.ai or open mysecond.ai/dashboard',
   ];
   return lines.join('\n');
 }

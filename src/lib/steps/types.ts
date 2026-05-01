@@ -28,6 +28,15 @@ export interface StepContext {
     // Step 9 stale-cache fallback signaling — runner uses this to print the
     // banner from §6.2.B after the success box.
     staleCacheUsed?: { cachedAgeHours: number };
+    // Step 13 reads these from the extracted plugin tree (skills/, agents/,
+    // commands/) and uses them in the post-install success message as proof
+    // that the install actually populated content. Computed lazily in step 13
+    // to avoid touching step 9's multiple LKG-fallback return paths.
+    pluginCounts?: {
+      skills: number;
+      agents: number;
+      workflows: number;
+    };
   };
 }
 
