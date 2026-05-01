@@ -6,3 +6,7 @@ coverage/
 .env
 .env.local
 .vitest-cache/
+
+# Local verification scratch
+.tmp/
+mysecond-cli-*.tgz

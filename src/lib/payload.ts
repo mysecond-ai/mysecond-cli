@@ -1,7 +1,7 @@
 // Payload type definitions for the mysecond-app companion API.
 // Mirrors GET /api/companion/cli-sync (down-sync) and POST /api/companion/artifacts.
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 
 import { shortHash } from './files.js';
@@ -57,6 +57,18 @@ export interface ArtifactsResponse {
   synced: number;
 }
 
+export interface ContextFilePayload {
+  file_path: string;
+  content: string;
+  current_hash: string;
+}
+
+export interface ContextFilesResponse {
+  synced: number;
+  skipped: number;
+  errors: string[];
+}
+
 export interface ArtifactDir {
   relativeDir: string;
   type: ArtifactType;
@@ -69,6 +81,21 @@ export const ARTIFACT_DIRS: readonly ArtifactDir[] = [
   { relativeDir: 'launch/outputs', type: 'launch' },
   { relativeDir: 'analytics/outputs', type: 'analytics' },
 ];
+
+export const CONTEXT_DIR = 'context';
+
+// Server PER_FILE_LIMIT is 50KB. Pre-filter to skip wasted round-trips.
+export const CONTEXT_PER_FILE_LIMIT = 50 * 1024;
+
+// Classify a write event's file path as a context file. Same path-safety
+// gate as classifyArtifactType — leading '/', traversal, absolute paths
+// rejected. Only `.md` files under `context/` qualify; nested paths
+// (e.g. context/personas/buyer.md) are supported.
+export function isContextFile(relativePath: string): boolean {
+  if (relativePath.startsWith('/') || relativePath.includes('..')) return false;
+  if (!relativePath.startsWith(CONTEXT_DIR + '/')) return false;
+  return relativePath.endsWith('.md');
+}
 
 // Classify a write event's file path into an artifact_type for PostToolUse.
 // Single source of truth — must agree with ARTIFACT_DIRS for the same paths or
@@ -97,6 +124,52 @@ export function scanArtifacts(rootDir: string): ArtifactPayload[] {
     walkArtifactDir(rootDir, dir, entry.type, found);
   }
   return found;
+}
+
+// Walk context/ under rootDir and produce payloads for every .md file. Mirrors
+// scanArtifacts but emits ContextFilePayload (no artifact_type / pm_name /
+// skill_slug) and uses CONTEXT_DIR as the single root.
+export function scanContextFiles(rootDir: string): ContextFilePayload[] {
+  const found: ContextFilePayload[] = [];
+  const dir = join(rootDir, CONTEXT_DIR);
+  if (!existsSync(dir)) return found;
+  walkContextDir(rootDir, dir, found);
+  return found;
+}
+
+function walkContextDir(
+  rootDir: string,
+  currentDir: string,
+  results: ContextFilePayload[]
+): void {
+  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+    // Skip dotfiles/dotdirs — `.git/`, `.DS_Store`, scratch files like
+    // `.notes.md` shouldn't leak to the server. Mirrors gitignore convention.
+    if (entry.name.startsWith('.')) continue;
+    const fullPath = join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      walkContextDir(rootDir, fullPath, results);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+
+    let content: string;
+    try {
+      // stat first — readFileSync on a 500MB file would OOM the SessionStart
+      // hook before the size check. Read only after we know the size is sane.
+      const stat = statSync(fullPath);
+      if (stat.size === 0 || stat.size > CONTEXT_PER_FILE_LIMIT) continue;
+      content = readFileSync(fullPath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    results.push({
+      file_path: relative(rootDir, fullPath),
+      content,
+      current_hash: shortHash(content),
+    });
+  }
 }
 
 function walkArtifactDir(

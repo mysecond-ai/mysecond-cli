@@ -9,6 +9,8 @@ import type {
   ArtifactPayload,
   ArtifactsResponse,
   CliSyncResponse,
+  ContextFilePayload,
+  ContextFilesResponse,
 } from './payload.js';
 import type { PluginTarballMeta } from './plugin-tarball.js';
 
@@ -125,6 +127,24 @@ export async function artifactsSync(
     return { synced: 0 };
   }
   return response.body as ArtifactsResponse;
+}
+
+// POST /api/companion/files — up-sync context files (company/product/personas/
+// competitors/goals + nested under context/). Mirrors artifactsSync semantics:
+// best-effort, server returns { synced, skipped, errors }.
+export async function contextFilesPush(
+  ctx: CommandContext,
+  files: readonly ContextFilePayload[]
+): Promise<ContextFilesResponse> {
+  if (files.length === 0) return { synced: 0, skipped: 0, errors: [] };
+  const response = await companionFetch(ctx, '/api/companion/files', {
+    method: 'POST',
+    body: { files },
+  });
+  if (response.status >= 400) {
+    return { synced: 0, skipped: 0, errors: [] };
+  }
+  return response.body as ContextFilesResponse;
 }
 
 // POST /api/setup/confirm — first-sync confirmation. Best-effort; non-critical
