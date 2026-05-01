@@ -17,7 +17,7 @@ describe('successBox: locked structure (May-2026 redesign)', () => {
       "✓ mySecond PM OS installed for Alice at Acme Corp
 
       Here's what's now in place:
-      - pm-os plugin registered (user scope) with 91 skills, 6 sub-agents, 4 workflows
+      - pm-os plugin registered with 91 skills, 6 sub-agents, 4 workflows
       - Context sync hooks active for every Claude Code session
       - Your context files will be created in step 2 below
 
