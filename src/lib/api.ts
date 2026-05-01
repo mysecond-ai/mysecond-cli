@@ -114,14 +114,20 @@ export async function cliSync(
 // POST /api/companion/artifacts — up-sync artifact files. Up-sync failure is
 // non-fatal: the down-sync result still reaches the customer. Caller decides
 // whether to surface the partial-success.
+//
+// timeoutMs: SessionStart hook callers should pass SILENT_SYNC_TIMEOUT_MS
+// (8s) to avoid stalling Claude Code Desktop launch on a slow server.
+// Default 30s for non-silent contexts.
 export async function artifactsSync(
   ctx: CommandContext,
-  artifacts: readonly ArtifactPayload[]
+  artifacts: readonly ArtifactPayload[],
+  opts: { timeoutMs?: number } = {}
 ): Promise<ArtifactsResponse> {
   if (artifacts.length === 0) return { synced: 0 };
   const response = await companionFetch(ctx, '/api/companion/artifacts', {
     method: 'POST',
     body: { artifacts },
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
   if (response.status >= 400) {
     return { synced: 0 };
@@ -132,14 +138,19 @@ export async function artifactsSync(
 // POST /api/companion/files — up-sync context files (company/product/personas/
 // competitors/goals + nested under context/). Mirrors artifactsSync semantics:
 // best-effort, server returns { synced, skipped, errors }.
+//
+// timeoutMs: same SessionStart hook contract as artifactsSync — pass
+// SILENT_SYNC_TIMEOUT_MS for fast-fail under load.
 export async function contextFilesPush(
   ctx: CommandContext,
-  files: readonly ContextFilePayload[]
+  files: readonly ContextFilePayload[],
+  opts: { timeoutMs?: number } = {}
 ): Promise<ContextFilesResponse> {
   if (files.length === 0) return { synced: 0, skipped: 0, errors: [] };
   const response = await companionFetch(ctx, '/api/companion/files', {
     method: 'POST',
     body: { files },
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
   if (response.status >= 400) {
     return { synced: 0, skipped: 0, errors: [] };

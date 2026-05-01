@@ -279,4 +279,37 @@ describe('runArtifactSync — context-file branch', () => {
     const written = JSON.parse(readFileSync(join(root, '.claude/sync-state.json'), 'utf8'));
     expect(written.contextFiles['context/company.md']).toBeDefined();
   });
+
+  // Follow-up #6 — server kill switch must propagate from the PostToolUse
+  // hook so subsequent events also stop. Previously the catch-all swallowed
+  // the rollbackPause MysecondError and the hook still returned 0.
+  it('re-throws rollbackPause (exitCode 7) on context branch when server returns halt header', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mysecond-pth-halt-'));
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'x');
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"synced":0}', {
+        status: 200,
+        headers: { 'X-Mysecond-Halt': '1' },
+      })
+    );
+    stubStdin(toolEvent('Write', join(root, 'context/company.md')));
+
+    await expect(runArtifactSync([], ctx(root))).rejects.toMatchObject({ exitCode: 7 });
+  });
+
+  it('re-throws rollbackPause (exitCode 7) on artifact branch when server returns halt header', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mysecond-pth-halt-art-'));
+    mkdirSync(join(root, 'specs/outputs'), { recursive: true });
+    writeFileSync(join(root, 'specs/outputs/foo.md'), 'x');
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"synced":0}', {
+        status: 200,
+        headers: { 'X-Mysecond-Halt': '1' },
+      })
+    );
+    stubStdin(toolEvent('Write', join(root, 'specs/outputs/foo.md')));
+
+    await expect(runArtifactSync([], ctx(root))).rejects.toMatchObject({ exitCode: 7 });
+  });
 });

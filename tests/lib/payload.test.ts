@@ -35,6 +35,13 @@ describe('classifyArtifactType', () => {
   it('skips test outputs', () => {
     expect(classifyArtifactType('specs/outputs/tests/x.md')).toBeNull();
   });
+
+  // Follow-up #8 — case-insensitive prefix match.
+  it('classifies case-variant artifact prefixes on case-insensitive filesystems', () => {
+    expect(classifyArtifactType('Specs/Outputs/foo.md')).toBe('prd');
+    expect(classifyArtifactType('STRATEGY/OUTPUTS/bar.md')).toBe('strategy');
+    expect(classifyArtifactType('Workflows/Foo/Outputs/z.md')).toBe('other');
+  });
 });
 
 describe('ARTIFACT_DIRS', () => {
@@ -77,6 +84,20 @@ describe('isContextFile', () => {
     expect(isContextFile('/abs/context/foo.md')).toBe(false);
     expect(isContextFile('../escape/context/foo.md')).toBe(false);
     expect(isContextFile('context/../etc/passwd')).toBe(false);
+  });
+
+  // Follow-up #8 — case-insensitive filesystems (macOS APFS, Windows NTFS
+  // default) resolve `Context/foo.md` and `context/foo.md` to the same disk
+  // file. A skill that emits the wrong case must not silently drop.
+  it('accepts case-variant context prefix on case-insensitive filesystems', () => {
+    expect(isContextFile('Context/company.md')).toBe(true);
+    expect(isContextFile('CONTEXT/personas.md')).toBe(true);
+    expect(isContextFile('CoNtExT/goals.md')).toBe(true);
+  });
+
+  it('accepts case-variant .md suffix', () => {
+    expect(isContextFile('context/company.MD')).toBe(true);
+    expect(isContextFile('context/product.Md')).toBe(true);
   });
 });
 

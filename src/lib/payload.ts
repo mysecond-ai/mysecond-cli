@@ -91,10 +91,15 @@ export const CONTEXT_PER_FILE_LIMIT = 50 * 1024;
 // gate as classifyArtifactType — leading '/', traversal, absolute paths
 // rejected. Only `.md` files under `context/` qualify; nested paths
 // (e.g. context/personas/buyer.md) are supported.
+//
+// Case-insensitive prefix check: macOS APFS / Windows NTFS default to
+// case-insensitive lookups, so `Context/foo.md` and `context/foo.md` resolve
+// to the same file on disk. A skill that emits the wrong case must not
+// silently drop on the floor — see follow-up #8 in mysecond-cli#11.
 export function isContextFile(relativePath: string): boolean {
   if (relativePath.startsWith('/') || relativePath.includes('..')) return false;
-  if (!relativePath.startsWith(CONTEXT_DIR + '/')) return false;
-  return relativePath.endsWith('.md');
+  if (!relativePath.toLowerCase().startsWith(CONTEXT_DIR + '/')) return false;
+  return relativePath.toLowerCase().endsWith('.md');
 }
 
 // Classify a write event's file path into an artifact_type for PostToolUse.
@@ -103,13 +108,16 @@ export function isContextFile(relativePath: string): boolean {
 // (PostToolUse single-file dispatch vs SessionStart full scan).
 export function classifyArtifactType(relativePath: string): ArtifactType | null {
   if (relativePath.startsWith('/') || relativePath.includes('..')) return null;
-  if (relativePath.includes('/tests/')) return null;
+  // Case-insensitive: same rationale as isContextFile — APFS/NTFS default
+  // case-insensitive lookups must not produce silent drops.
+  const lower = relativePath.toLowerCase();
+  if (lower.includes('/tests/')) return null;
   for (const dir of ARTIFACT_DIRS) {
-    if (relativePath.startsWith(dir.relativeDir + '/')) return dir.type;
+    if (lower.startsWith(dir.relativeDir.toLowerCase() + '/')) return dir.type;
   }
   // Workflow outputs aren't in ARTIFACT_DIRS (they're scanned per-workflow not
   // per-tier), but the PostToolUse hook still classifies them.
-  if (/^workflows\/[^/]+\/outputs\//.test(relativePath)) return 'other';
+  if (/^workflows\/[^/]+\/outputs\//.test(lower)) return 'other';
   return null;
 }
 
