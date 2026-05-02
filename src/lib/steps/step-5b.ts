@@ -77,6 +77,55 @@ function emitWarning(_silent: boolean, message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
+/**
+ * Runs the `.env`-gitignore security guard. Exported separately from `step5b`
+ * so init-runner can call it from step-5's catch handler — if step-5 throws
+ * (e.g. .env conflict before --fix), the customer's existing un-gitignored
+ * .env is the security risk this PR was scoped to fix. Without this, an
+ * orphan .env sits in the repo with the key un-protected.
+ *
+ * Behavior matches the inline version in step5b's happy path:
+ *  • Skipped if not a git repo (no point creating a stray .gitignore)
+ *  • LOUD warning if .env is already git-tracked (gitignore is a no-op then)
+ *  • Otherwise: pre-write notice + atomic append to .gitignore
+ *  • Idempotent — safe to call multiple times in one init run
+ */
+export function runGitignoreGuard(rootDir: string, silent: boolean): void {
+  if (!isGitRepo(rootDir)) return;
+
+  if (isFileTracked(rootDir, '.env')) {
+    emitWarning(
+      silent,
+      '[mysecond] ⚠️ SECURITY: .env is tracked by git in this repo. Your COMPANION_API_KEY is in your git history right now. Remediate:\n' +
+        '  1. git rm --cached .env\n' +
+        '  2. git commit -m "stop tracking .env"\n' +
+        '  3. Rotate your key at app.mysecond.ai (the old key is in git history forever).\n' +
+        '  4. Re-run `mysecond init` with the new key.'
+    );
+    return;
+  }
+
+  // Pre-write notice + ensure entry. Customer-empathy: print BEFORE mutating.
+  const path = join(rootDir, '.gitignore');
+  const willMutate =
+    !existsSync(path) ||
+    !readFileSync(path, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .includes('.env');
+  if (willMutate) {
+    emit(silent, '[mysecond] Adding `.env` to .gitignore as a safety net.');
+  }
+  try {
+    ensureGitignoreEntry(rootDir, '.env');
+  } catch (err) {
+    emitWarning(
+      silent,
+      `[mysecond] ⚠️ Could not update .gitignore (${(err as Error).message}). Add \`.env\` manually so your API key isn't committed.`
+    );
+  }
+}
+
 export const step5b: StepFn = async ({ ctx }) => {
   // Windows guard — explicit skip + log per CTO review.
   if (process.platform === 'win32') {
@@ -180,44 +229,7 @@ export const step5b: StepFn = async ({ ctx }) => {
   }
 
   // ── Gitignore guard ─────────────────────────────────────────────────────
-  // Gate on .git existence — non-repo folders shouldn't get a stray .gitignore.
-  if (isGitRepo(ctx.rootDir)) {
-    // Check tracked-status FIRST. If `.env` is already in git's index,
-    // appending to .gitignore is a security-theatre no-op — the key is
-    // already in committed history. Surface a loud warning so the customer
-    // knows to remediate (git rm --cached + commit + key rotation).
-    if (isFileTracked(ctx.rootDir, '.env')) {
-      emitWarning(
-        ctx.silent,
-        '[mysecond] ⚠️ SECURITY: .env is tracked by git in this repo. Your COMPANION_API_KEY is in your git history right now. Remediate:\n' +
-          '  1. git rm --cached .env\n' +
-          '  2. git commit -m "stop tracking .env"\n' +
-          '  3. Rotate your key at app.mysecond.ai (the old key is in git history forever).\n' +
-          '  4. Re-run `mysecond init` with the new key.'
-      );
-    } else {
-      // Pre-write notice + ensure entry. Customer-empathy per CAIO review:
-      // print BEFORE mutating, not after.
-      const path = join(ctx.rootDir, '.gitignore');
-      const willMutate =
-        !existsSync(path) ||
-        !readFileSync(path, 'utf8')
-          .split('\n')
-          .map((l) => l.trim())
-          .includes('.env');
-      if (willMutate) {
-        emit(ctx.silent, '[mysecond] Adding `.env` to .gitignore as a safety net.');
-      }
-      try {
-        ensureGitignoreEntry(ctx.rootDir, '.env');
-      } catch (err) {
-        emitWarning(
-          ctx.silent,
-          `[mysecond] ⚠️ Could not update .gitignore (${(err as Error).message}). Add \`.env\` manually so your API key isn't committed.`
-        );
-      }
-    }
-  }
+  runGitignoreGuard(ctx.rootDir, ctx.silent);
 
   return { step: 14, outcome: { kind: 'completed' } };
 };
