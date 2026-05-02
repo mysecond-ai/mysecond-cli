@@ -45,14 +45,31 @@ describe('classifyArtifactType', () => {
 });
 
 describe('ARTIFACT_DIRS', () => {
-  it('covers the 5 known output locations', () => {
+  it('covers the canonical work/* output locations + legacy unprefixed', () => {
+    // Canonical: every skill writes to work/<area>/outputs/...
+    // Legacy: pre-work/ tree convention, kept as back-compat synonyms.
     expect(ARTIFACT_DIRS.map((d) => d.relativeDir).sort()).toEqual([
       'analytics/outputs',
       'discovery/outputs',
       'launch/outputs',
       'specs/outputs',
       'strategy/outputs',
+      'work/discovery/outputs',
+      'work/launches/outputs',
+      'work/specs/outputs',
+      'work/strategy/outputs',
     ]);
+  });
+
+  it('classifies a real skill output path (work/specs/outputs/...) as prd', () => {
+    // Regression: 2026-05-02 customer E2E — /prd-generator wrote to
+    // work/specs/outputs/2026-05-02-1622/prd-dashboard.md, but the cli's
+    // PostToolUse handler returned null because ARTIFACT_DIRS didn't include
+    // the work/ prefix. Lock that path.
+    expect(classifyArtifactType('work/specs/outputs/2026-05-02-1622/prd-dashboard.md')).toBe('prd');
+    expect(classifyArtifactType('work/strategy/outputs/2026-05-01/competitive-profile.md')).toBe('strategy');
+    expect(classifyArtifactType('work/discovery/outputs/2026-05-01/research.md')).toBe('research');
+    expect(classifyArtifactType('work/launches/outputs/2026-05-01/launch-plan.md')).toBe('launch');
   });
 });
 

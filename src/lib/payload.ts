@@ -74,7 +74,22 @@ export interface ArtifactDir {
   type: ArtifactType;
 }
 
+// Skills under content/skills/*/SKILL.md write outputs to `work/<area>/outputs/…`
+// (work/specs, work/discovery, work/strategy, work/launches). The `work/`
+// prefix is canonical — skills that wrote to bare `specs/outputs/…` were the
+// legacy pattern before the work/ activity-tree convention landed. Both
+// prefixed and unprefixed variants are accepted so any legacy customer
+// artifacts on disk keep syncing; canonical location is the work/ form.
+//
+// Note `work/launches/outputs` (plural) matches what skills emit. The legacy
+// `launch/outputs` entry is a back-compat synonym.
 export const ARTIFACT_DIRS: readonly ArtifactDir[] = [
+  // Canonical work/ activity-tree paths (what every skill writes today)
+  { relativeDir: 'work/specs/outputs', type: 'prd' },
+  { relativeDir: 'work/discovery/outputs', type: 'research' },
+  { relativeDir: 'work/strategy/outputs', type: 'strategy' },
+  { relativeDir: 'work/launches/outputs', type: 'launch' },
+  // Legacy un-prefixed paths (back-compat)
   { relativeDir: 'specs/outputs', type: 'prd' },
   { relativeDir: 'discovery/outputs', type: 'research' },
   { relativeDir: 'strategy/outputs', type: 'strategy' },
