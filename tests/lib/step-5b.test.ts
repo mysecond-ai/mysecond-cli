@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { step5b } from '../../src/lib/steps/step-5b.js';
+import { runGitignoreGuard, step5b } from '../../src/lib/steps/step-5b.js';
 import { projectHash } from '../../src/lib/project-hash.js';
 import type { CommandContext } from '../../src/lib/context.js';
 import type { SyncState } from '../../src/lib/sync-state.js';
@@ -265,5 +265,45 @@ describe('step-5b — clean install (no .env present)', () => {
     );
     expect(existsSync(credsPath)).toBe(true);
     expect(readFileSync(credsPath, 'utf8')).toContain(TEST_KEY);
+  });
+});
+
+describe('runGitignoreGuard — orphan-migration safety (called from init-runner on step-5 throw)', () => {
+  it('exported for init-runner to call independently', () => {
+    expect(typeof runGitignoreGuard).toBe('function');
+  });
+
+  it('appends .env to .gitignore when called standalone in a git repo', () => {
+    if (process.platform === 'win32') return;
+    mkdirSync(join(projectDir, '.git'), { recursive: true });
+    runGitignoreGuard(projectDir, false);
+    expect(readFileSync(join(projectDir, '.gitignore'), 'utf8')).toContain('.env');
+  });
+
+  it('skips silently if not a git repo (no orphan .gitignore created)', () => {
+    if (process.platform === 'win32') return;
+    runGitignoreGuard(projectDir, false);
+    expect(existsSync(join(projectDir, '.gitignore'))).toBe(false);
+  });
+
+  it('still emits SECURITY warning when .env is git-tracked, even on orphan path', () => {
+    if (process.platform === 'win32') return;
+    try {
+      execFileSync('git', ['--version'], { stdio: 'pipe' });
+    } catch {
+      return;
+    }
+    execFileSync('git', ['init', '-q'], { cwd: projectDir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: projectDir });
+    writeFileSync(join(projectDir, '.env'), `COMPANION_API_KEY=${TEST_KEY}\n`);
+    execFileSync('git', ['add', '.env'], { cwd: projectDir });
+    execFileSync('git', ['commit', '-q', '-m', 'oops'], { cwd: projectDir });
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    runGitignoreGuard(projectDir, false);
+    const warnings = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(warnings).toContain('SECURITY');
+    expect(warnings).toContain('.env is tracked by git');
   });
 });

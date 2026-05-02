@@ -17,6 +17,7 @@ import {
 } from './sync-state.js';
 
 import { STEPS, type StepEntry } from './steps/index.js';
+import { runGitignoreGuard } from './steps/step-5b.js';
 import type { StepContext } from './steps/types.js';
 
 export async function runInit(ctx: CommandContext): Promise<number> {
@@ -98,7 +99,26 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       }
       // RED-TEAM R2 P1-D: track current step for SIGINT telemetry above.
       currentStepNumber = entry.number;
-      const result = await entry.fn(sctx);
+      let result;
+      try {
+        result = await entry.fn(sctx);
+      } catch (err) {
+        // Orphan-migration safety: if step-5 (.env write) throws — most
+        // commonly an env conflict the customer didn't pass --fix for —
+        // the gitignore guard from step-5b would otherwise never run, and
+        // the customer's existing .env sits un-protected. Run the guard
+        // here on the failure path so the security mitigation always lands.
+        // No-op on success (step-5b runs the guard normally) and no-op
+        // outside step 5 (other steps don't touch credentials).
+        if (entry.number === 5) {
+          try {
+            runGitignoreGuard(ctx.rootDir, ctx.silent);
+          } catch {
+            // Guard itself failed — don't mask the original error.
+          }
+        }
+        throw err;
+      }
 
       if (result.message !== undefined && !ctx.silent) {
         process.stdout.write(result.message + '\n');
