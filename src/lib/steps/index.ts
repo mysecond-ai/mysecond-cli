@@ -37,6 +37,12 @@ export const STEPS: readonly StepEntry[] = [
   // Project-scoped credential storage + .env-to-projects/<hash> migration +
   // .gitignore guard. v1.4.0 may renumber; until then the float-y position
   // here documents that this runs immediately after step 5.
+  //
+  // Upgrade behavior (v1.3.3 → v1.3.4): customers with a complete v1.3.3
+  // ledger (steps 1..13 marked done) re-running `init` will skip 1..13 and
+  // run step 14 once. Subsequent reruns no-op step 14 via its idempotency
+  // checks. Counter display reads "step 14/14" because /${STEPS.length} —
+  // not a bug, just slightly surprising on first reread of the runner code.
   { number: 14, fn: step5b, mutates: true, description: 'Write project-scoped credentials + gitignore guard' },
   { number: 6, fn: step6, mutates: true,  description: 'Write .claude/settings.json env block' },
   { number: 7, fn: step7, mutates: true,  description: 'Write CLAUDE.md @import block' },

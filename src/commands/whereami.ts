@@ -9,6 +9,7 @@
 // Read-only. Never modifies disk. Safe to run anywhere.
 
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { CommandContext } from '../lib/context.js';
@@ -58,10 +59,29 @@ function maskKey(key: string | null): string {
   return `${key.slice(0, 12)}…${key.slice(-4)}`;
 }
 
+/**
+ * Redact a filesystem path so it's safe to paste in a support ticket.
+ * Replaces $HOME with `~` and elides the project basename when it appears
+ * to be a customer artifact (e.g. `~/Documents/clients/acme-secret-deal/`).
+ *
+ * Customer empathy: full absolute paths leak personal info (home dir name
+ * = real name, project basename = client/project). Default-redact unless
+ * `--verbose` is passed.
+ */
+function redactPath(absPath: string): string {
+  const home = homedir();
+  if (absPath.startsWith(home)) {
+    return `~${absPath.slice(home.length)}`;
+  }
+  return absPath;
+}
+
 export async function runWhereami(
-  _args: readonly string[],
+  args: readonly string[],
   ctx: CommandContext
 ): Promise<number> {
+  const verbose = args.includes('--verbose') || args.includes('-v');
+  const fmt = verbose ? (p: string): string => p : redactPath;
   const rootDir = ctx.rootDir;
   const hash = projectHash(rootDir);
   const projectScopedPath = getProjectScopedCredsPath(rootDir);
@@ -96,21 +116,27 @@ export async function runWhereami(
 
   const out = process.stdout;
   out.write(`mysecond whereami — credential lookup for this project\n\n`);
-  out.write(`project_dir : ${rootDir}\n`);
+  out.write(`project_dir : ${fmt(rootDir)}\n`);
   out.write(`hash        : ${hash}\n`);
-  out.write(`creds dir   : ${getProjectScopedCredsDir(rootDir)}\n\n`);
+  out.write(`creds dir   : ${fmt(getProjectScopedCredsDir(rootDir))}\n\n`);
 
   out.write(`Precedence chain (highest wins):\n`);
   for (const s of sources) {
     const status = s.hasKey ? '✓ has key' : s.exists ? '· file present, no key' : '· not present';
     out.write(`  ${s.label}\n`);
-    out.write(`    path : ${s.path}\n`);
+    out.write(`    path : ${fmt(s.path)}\n`);
     out.write(`    state: ${status}\n`);
   }
 
   out.write(`\nResolved key : ${maskKey(winningKey)}\n`);
   if (winner !== undefined) {
-    out.write(`Source       : ${winner.path}\n`);
+    out.write(`Source       : ${fmt(winner.path)}\n`);
+  }
+
+  if (!verbose) {
+    out.write(
+      `\nPaths shown with $HOME → ~ for safe-to-share output. Pass --verbose for full paths.\n`
+    );
   }
 
   // Dual/triple-creds warning — same threat model the hook detects.
@@ -119,6 +145,20 @@ export async function runWhereami(
     out.write(
       `\n⚠️  COMPANION_API_KEY is set in ${sourcesWithKey.length} sources. The first one above wins. ` +
         `If sync to mySecond looks wrong, remove the stale source(s).\n`
+    );
+  }
+
+  // Migration nudge for install-once customers: project-scoped is missing
+  // but .env has a key. They never re-ran `mysecond init` so step-5b never
+  // fired the migration. Surface it here so subsequent `whereami` runs (a
+  // common support-ticket flow) produce action.
+  const projectScoped = sources[0];
+  const envSource = sources[1];
+  if (projectScoped !== undefined && envSource !== undefined &&
+      !projectScoped.hasKey && envSource.hasKey) {
+    out.write(
+      `\n💡 Your COMPANION_API_KEY only lives in .env, which can be committed to git.\n` +
+      `   Run \`mysecond init\` to migrate it into a project-scoped global file (\`${fmt(projectScoped.path)}\`).\n`
     );
   }
 

@@ -13,10 +13,24 @@ import { join } from 'node:path';
 
 import { atomicWriteFile } from './atomic-write.js';
 
-/** Cheap, no-shell-spawn check: is this directory inside a git repo? */
+/**
+ * Cheap, no-shell-spawn check: is this directory inside a git repo?
+ *
+ * Walks up looking for a .git entry (directory in main repos, file in
+ * worktrees). The 30-level cap is empirically chosen: deep monorepos
+ * commonly nest 8-12 levels; 30 covers any realistic real-world depth
+ * while bounding what would otherwise be unbounded I/O if the path
+ * never reaches root (`parent === dir` is the canonical root sentinel
+ * but is technically reachable only on POSIX). Worktrees and submodule
+ * setups work because `existsSync` follows symlinks.
+ *
+ * Edge case: if `rootDir` is a deep subfolder of an UNRELATED parent git
+ * repo (e.g. `~/Documents/somerepo/notes/myproject`), this returns true
+ * for the parent's repo. Step-5b's gitignore guard will then mutate the
+ * PARENT's .gitignore — usually fine but possibly surprising. Document
+ * this in a `CLAUDE.md` or release note if customer reports surface.
+ */
 export function isGitRepo(rootDir: string): boolean {
-  // Walk up looking for a .git directory or file (worktrees use a file).
-  // Bound the walk at 30 levels so a path with no .git anywhere doesn't loop.
   let dir = rootDir;
   for (let i = 0; i < 30; i++) {
     if (existsSync(join(dir, '.git'))) return true;

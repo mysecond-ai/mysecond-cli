@@ -67,13 +67,14 @@ function emit(silent: boolean, message: string): void {
   process.stdout.write(`${message}\n`);
 }
 
-function emitWarning(silent: boolean, message: string): void {
-  // Warnings always go to stderr regardless of --silent so security-critical
-  // info isn't suppressed. (--silent is for happy-path noise.)
+function emitWarning(_silent: boolean, message: string): void {
+  // Stderr only — when stderr and stdout share a TTY (the common case), the
+  // warning is visible in the customer's terminal. Earlier versions also
+  // dup'd to stdout, which double-printed multi-line warnings (the 5-line
+  // git-tracked SECURITY warning rendered as 10 lines). Stderr is the right
+  // channel for warnings and the `--silent` flag deliberately doesn't
+  // suppress it: security-critical info must reach the customer.
   process.stderr.write(`${message}\n`);
-  // Also dup to stdout when not silent so the user sees it inline with the
-  // success-output stream, not just buried in stderr.
-  if (!silent) process.stdout.write(`${message}\n`);
 }
 
 export const step5b: StepFn = async ({ ctx }) => {
@@ -132,6 +133,15 @@ export const step5b: StepFn = async ({ ctx }) => {
     );
   } else {
     // Write (atomic via temp+rename) with mode 0o600.
+    //
+    // Note: atomicWriteFile uses a deterministic temp filename
+    // (`<path>.tmp-<pid>`) and writes with mode 0o600, so the temp file is
+    // never world-readable. There is a theoretical TOCTOU window where a
+    // local attacker who knows our PID could open() the temp path before
+    // rename() and retain a fd that survives the rename. Exploitability
+    // requires (a) shell access on the customer machine, (b) PID prediction,
+    // (c) sub-millisecond timing. Accepted risk for v1.3.4; revisit if any
+    // hardened-environment customer surfaces this.
     try {
       atomicWriteFile(credsPath, `${ENV_KEY}=${newKey}\n`, { mode: 0o600 });
     } catch (err) {
@@ -159,7 +169,7 @@ export const step5b: StepFn = async ({ ctx }) => {
     if (isMigration) {
       emit(
         ctx.silent,
-        '[mysecond] Secured your API key: moved out of .env (which can leak into git history) into a global file. Run `mysecond whereami` to see where your credentials live.'
+        '[mysecond] Secured your API key: moved out of .env (which can be committed to git) into a global file. Run `mysecond whereami` to see where your credentials live.'
       );
     } else if (dirCreated) {
       emit(

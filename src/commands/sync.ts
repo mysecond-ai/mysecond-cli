@@ -12,6 +12,7 @@ import {
 } from '../lib/api.js';
 import type { CommandContext } from '../lib/context.js';
 import { resolveConflict, type ConflictOutcome } from '../lib/conflict.js';
+import { getProjectScopedCredsPath } from '../lib/creds-path.js';
 import { MysecondError } from '../lib/errors.js';
 import {
   projectPaths,
@@ -226,6 +227,36 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   }
 }
 
+/**
+ * Migration nudge for install-once customers who never re-ran `mysecond
+ * init` after v1.3.4 shipped, so step-5b never migrated their .env key
+ * into the project-scoped global path. Surface a one-liner so the
+ * customer's next routine `sync` produces a remediation prompt without
+ * forcing it. Cheap, idempotent, doesn't block the sync.
+ *
+ * Skipped on Windows (step-5b doesn't run there in v1.3.4) and when
+ * `--silent` is set (used by the SessionStart hook — don't pollute logs).
+ */
+function maybeNudgeCredsMigration(ctx: CommandContext): void {
+  if (process.platform === 'win32') return;
+  if (ctx.silent) return;
+  const projectScoped = getProjectScopedCredsPath(ctx.rootDir);
+  const envPath = `${ctx.rootDir}/.env`;
+  if (existsSync(projectScoped)) return; // already migrated
+  if (!existsSync(envPath)) return;       // no .env to migrate
+  // Cheap content check — only nudge if .env actually has the key.
+  try {
+    const raw = readFileSync(envPath, 'utf8');
+    if (!/^(?:export\s+)?COMPANION_API_KEY=/m.test(raw)) return;
+  } catch {
+    return;
+  }
+  process.stderr.write(
+    '[mysecond] 💡 Your COMPANION_API_KEY only lives in .env, which can be committed to git.\n' +
+    '   Run `mysecond init` to migrate it into a project-scoped global file. (One-time, ~2 sec.)\n'
+  );
+}
+
 export async function runSync(
   _args: readonly string[],
   ctx: CommandContext
@@ -233,6 +264,8 @@ export async function runSync(
   if (ctx.apiKey.length === 0) {
     throw MysecondError.invalidApiKey('COMPANION_API_KEY not set');
   }
+
+  maybeNudgeCredsMigration(ctx);
 
   const summary = emptySummary();
   const state = readSyncState(ctx.rootDir);
