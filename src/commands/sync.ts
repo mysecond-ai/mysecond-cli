@@ -313,14 +313,20 @@ export async function runSync(
 
   const paths = projectPaths(ctx.rootDir);
 
+  // file_path values from the API are already project-relative (e.g.
+  // "context/company.md", "work/specs/outputs/.../prd.md"). Use rootDir as
+  // the base — using contextDir prepended an extra "context/" to every path,
+  // so work outputs landed under <rootDir>/context/work/... instead of
+  // <rootDir>/work/...  (regression introduced when the API started serving
+  // work/* and decisions/* alongside context/*).
   for (const file of contextFiles) {
-    const localContent = readLocalFile(paths.contextDir, file.file_path);
+    const localContent = readLocalFile(ctx.rootDir, file.file_path);
     const outcome = resolveConflict({ file, localContent, syncState: state, ctx });
     tally(summary, outcome);
   }
 
   for (const filePath of deletedPaths) {
-    if (deleteLocalFile(paths.contextDir, filePath)) {
+    if (deleteLocalFile(ctx.rootDir, filePath)) {
       delete state.files[filePath];
       summary.deleted++;
     }

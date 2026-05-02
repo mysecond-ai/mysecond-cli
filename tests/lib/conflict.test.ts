@@ -40,29 +40,29 @@ describe('resolveConflict — first-time create', () => {
     const root = tmpProject();
     const state = emptyState();
     const outcome = resolveConflict({
-      file: file('company.md', 'hello'),
+      file: file('context/company.md', 'hello'),
       localContent: null,
       syncState: state,
       ctx: ctx(root),
     });
     expect(outcome.kind).toBe('created');
     expect(readFileSync(join(root, 'context/company.md'), 'utf8')).toBe('hello');
-    expect(state.files['company.md']).toBeDefined();
+    expect(state.files['context/company.md']).toBeDefined();
   });
 });
 
 describe('resolveConflict — no divergence', () => {
   it('reports unchanged when local + cloud match a recorded hash', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'hello');
+    writeLocalFile(root, 'context/company.md', 'hello');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('hello'),
       cloudHash: sha256('hello'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'hello'),
+      file: file('context/company.md', 'hello'),
       localContent: 'hello',
       syncState: state,
       ctx: ctx(root),
@@ -74,15 +74,15 @@ describe('resolveConflict — no divergence', () => {
 describe('resolveConflict — only cloud changed', () => {
   it('overwrites local with cloud version', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'old');
+    writeLocalFile(root, 'context/company.md', 'old');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('old'),
       cloudHash: sha256('old'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'new-cloud'),
+      file: file('context/company.md', 'new-cloud'),
       localContent: 'old',
       syncState: state,
       ctx: ctx(root),
@@ -95,15 +95,15 @@ describe('resolveConflict — only cloud changed', () => {
 describe('resolveConflict — only local changed', () => {
   it('keeps local untouched and updates the ledger', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'local-edit');
+    writeLocalFile(root, 'context/company.md', 'local-edit');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('original'),
       cloudHash: sha256('original'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'original'),
+      file: file('context/company.md', 'original'),
       localContent: 'local-edit',
       syncState: state,
       ctx: ctx(root),
@@ -116,15 +116,15 @@ describe('resolveConflict — only local changed', () => {
 describe('resolveConflict — both changed (Option 1 minimum safety net)', () => {
   it('cloud-wins strategy: writes cloud, backs up local, returns conflict-cloud-kept', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'local-edit');
+    writeLocalFile(root, 'context/company.md', 'local-edit');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('original'),
       cloudHash: sha256('original'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'cloud-edit'),
+      file: file('context/company.md', 'cloud-edit'),
       localContent: 'local-edit',
       syncState: state,
       ctx: ctx(root, { strategy: 'cloud-wins' }),
@@ -145,15 +145,15 @@ describe('resolveConflict — both changed (Option 1 minimum safety net)', () =>
 
   it('local-wins strategy: keeps local, backs up cloud, returns conflict-local-kept', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'local-edit');
+    writeLocalFile(root, 'context/company.md', 'local-edit');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('original'),
       cloudHash: sha256('original'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'cloud-edit'),
+      file: file('context/company.md', 'cloud-edit'),
       localContent: 'local-edit',
       syncState: state,
       ctx: ctx(root, { strategy: 'local-wins' }),
@@ -168,15 +168,15 @@ describe('resolveConflict — both changed (Option 1 minimum safety net)', () =>
 
   it('skip strategy: leaves local alone, only saves cloud version for inspection', () => {
     const root = tmpProject();
-    writeLocalFile(join(root, 'context'), 'company.md', 'local-edit');
+    writeLocalFile(root, 'context/company.md', 'local-edit');
     const state = emptyState();
-    state.files['company.md'] = {
+    state.files['context/company.md'] = {
       localHash: sha256('original'),
       cloudHash: sha256('original'),
       lastSyncedAt: new Date().toISOString(),
     };
     const outcome = resolveConflict({
-      file: file('company.md', 'cloud-edit'),
+      file: file('context/company.md', 'cloud-edit'),
       localContent: 'local-edit',
       syncState: state,
       ctx: ctx(root, { strategy: 'skip' }),
