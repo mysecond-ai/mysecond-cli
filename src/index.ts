@@ -3,6 +3,7 @@
 import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+import { runWhereami } from './commands/whereami.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
 import { exitFromError } from './lib/errors.js';
 
@@ -29,6 +30,11 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     name: 'artifact-sync',
     summary: 'Push a changed artifact (skill output, doc, plan) up to mysecond.ai.',
     run: runArtifactSync,
+  },
+  {
+    name: 'whereami',
+    summary: 'Print where this project\'s COMPANION_API_KEY is loaded from + the precedence chain.',
+    run: runWhereami,
   },
 ];
 

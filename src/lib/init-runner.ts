@@ -80,7 +80,7 @@ export async function runInit(ctx: CommandContext): Promise<number> {
     for (const entry of STEPS) {
       if (isStepComplete(state, entry.number)) {
         if (!ctx.silent) {
-          process.stdout.write(`step ${entry.number}/13: ${entry.description} — already done, skipping\n`);
+          process.stdout.write(`step ${entry.number}/${STEPS.length}: ${entry.description} — already done, skipping\n`);
         }
         continue;
       }
@@ -88,13 +88,13 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       if (ctx.dryRun && entry.mutates) {
         // --dry-run: skip mutating steps, log what would happen, never advance ledger.
         if (!ctx.silent) {
-          process.stdout.write(`step ${entry.number}/13 (dry-run): would ${entry.description}\n`);
+          process.stdout.write(`step ${entry.number}/${STEPS.length} (dry-run): would ${entry.description}\n`);
         }
         continue;
       }
 
       if (!ctx.silent) {
-        process.stdout.write(`step ${entry.number}/13: ${entry.description}…\n`);
+        process.stdout.write(`step ${entry.number}/${STEPS.length}: ${entry.description}…\n`);
       }
       // RED-TEAM R2 P1-D: track current step for SIGINT telemetry above.
       currentStepNumber = entry.number;

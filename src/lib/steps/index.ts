@@ -5,6 +5,7 @@ import { step2 } from './step-2.js';
 import { step3 } from './step-3.js';
 import { step4 } from './step-4.js';
 import { step5 } from './step-5.js';
+import { step5b } from './step-5b.js';
 import { step6 } from './step-6.js';
 import { step7 } from './step-7.js';
 import { step8 } from './step-8.js';
@@ -31,6 +32,18 @@ export const STEPS: readonly StepEntry[] = [
   { number: 3, fn: step3, mutates: false, description: '(removed in v1.5 — placeholder)' },
   { number: 4, fn: step4, mutates: false, description: 'Poll /install-ready' },
   { number: 5, fn: step5, mutates: true,  description: 'Write .env' },
+  // Step 14 (numbered out-of-order to preserve the canonical 1..13 ledger
+  // identifiers — runner iterates STEPS in array order, not number order).
+  // Project-scoped credential storage + .env-to-projects/<hash> migration +
+  // .gitignore guard. v1.4.0 may renumber; until then the float-y position
+  // here documents that this runs immediately after step 5.
+  //
+  // Upgrade behavior (v1.3.3 → v1.3.4): customers with a complete v1.3.3
+  // ledger (steps 1..13 marked done) re-running `init` will skip 1..13 and
+  // run step 14 once. Subsequent reruns no-op step 14 via its idempotency
+  // checks. Counter display reads "step 14/14" because /${STEPS.length} —
+  // not a bug, just slightly surprising on first reread of the runner code.
+  { number: 14, fn: step5b, mutates: true, description: 'Write project-scoped credentials + gitignore guard' },
   { number: 6, fn: step6, mutates: true,  description: 'Write .claude/settings.json env block' },
   { number: 7, fn: step7, mutates: true,  description: 'Write CLAUDE.md @import block' },
   { number: 8, fn: step8, mutates: true,  description: 'Persist sync-state.json' },
