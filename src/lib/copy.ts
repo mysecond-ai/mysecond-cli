@@ -73,7 +73,7 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '',
     'After running `mysecond init`, the only next step for a new user is `/welcome`. Do not suggest `/enhance-context`, `/prd-generator`, or other skills before `/welcome` runs — no context files exist yet, and those skills depend on them. Stay quiet about skill discovery; let `/welcome` drive the first-run experience.',
     '',
-    'If summarizing the install confirmation, you MUST mention all three counts the cli reported (skills, sub-agents, workflows) — do not drop any.',
+    'If summarizing the install confirmation, mention ONLY the three counts the cli printed in its success box (skills, sub-agents, workflows). Do NOT invent or add additional totals (e.g., "N skills synced from mysecond.ai") — those server-side numbers double-count internal entities and will mislead the user.',
   ].join('\n');
 }
 

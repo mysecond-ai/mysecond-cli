@@ -88,11 +88,15 @@ function emitNotice(message: string, ctx: CommandContext): void {
 
 export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   const { file, localContent, syncState, ctx } = input;
-  const { contextDir, conflictsDir } = projectPaths(ctx.rootDir);
+  const { conflictsDir } = projectPaths(ctx.rootDir);
   const nowIso = new Date().toISOString();
 
+  // file_path values from the API are project-relative (already include
+  // "context/" prefix where applicable, plus "work/", "decisions/", etc.).
+  // Use rootDir as the write base — writing under contextDir prepended an
+  // extra "context/" to non-context paths, double-nesting work outputs.
   if (localContent === null) {
-    const ok = writeLocalFile(contextDir, file.file_path, file.content);
+    const ok = writeLocalFile(ctx.rootDir, file.file_path, file.content);
     if (!ok) return { kind: 'conflict-skipped' };
     recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
     return { kind: 'created', writtenPath: file.file_path };
@@ -108,7 +112,7 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   }
 
   if (cloudChanged && !localChanged) {
-    const ok = writeLocalFile(contextDir, file.file_path, file.content);
+    const ok = writeLocalFile(ctx.rootDir, file.file_path, file.content);
     if (!ok) return { kind: 'conflict-skipped' };
     recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
     return { kind: 'updated-from-cloud', writtenPath: file.file_path };
@@ -136,7 +140,7 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
     const cloudBackup = join(conflictsDir, `${safeName}-cloud-${stamp}.md`);
     writeLocalFile(conflictsDir, `${safeName}-cloud-${stamp}.md`, file.content);
     emitNotice(
-      `Conflict in context/${file.file_path} — skipped. Cloud version saved to ${cloudBackup}`,
+      `Conflict in ${file.file_path} — skipped. Cloud version saved to ${cloudBackup}`,
       ctx
     );
     return { kind: 'conflict-skipped' };
@@ -147,7 +151,7 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
     writeLocalFile(conflictsDir, `${safeName}-cloud-${stamp}.md`, file.content);
     recordSyncedFile(syncState, file.file_path, localContent, file.current_hash, nowIso);
     emitNotice(
-      `Conflict in context/${file.file_path} — kept local. Cloud version saved to ${cloudBackup}`,
+      `Conflict in ${file.file_path} — kept local. Cloud version saved to ${cloudBackup}`,
       ctx
     );
     return { kind: 'conflict-local-kept', backupPath: cloudBackup };
@@ -157,11 +161,11 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   // up local. Most customers hit this path.
   const localBackup = join(conflictsDir, `${safeName}-local-${stamp}.md`);
   writeLocalFile(conflictsDir, `${safeName}-local-${stamp}.md`, localContent);
-  const ok = writeLocalFile(contextDir, file.file_path, file.content);
+  const ok = writeLocalFile(ctx.rootDir, file.file_path, file.content);
   if (!ok) return { kind: 'conflict-skipped' };
   recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
   emitNotice(
-    `Conflict in context/${file.file_path} — kept cloud version (your local edits saved to ${localBackup})`,
+    `Conflict in ${file.file_path} — kept cloud version (your local edits saved to ${localBackup})`,
     ctx
   );
   return { kind: 'conflict-cloud-kept', writtenPath: file.file_path, backupPath: localBackup };
