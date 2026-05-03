@@ -17,13 +17,20 @@ import { MysecondError } from '../lib/errors.js';
 import {
   projectPaths,
   readLocalFile,
+  shortHash,
   writeLocalFile,
   deleteLocalFile,
 } from '../lib/files.js';
+import {
+  readInstallState,
+  writeInstallState,
+  type InstallState,
+} from '../lib/install-state.js';
 import { markNpmUpdated, shouldRunNpmUpdate } from '../lib/npm.js';
 import {
   scanArtifacts,
   scanContextFiles,
+  type BasePluginFile,
   type CompanionFile,
   type ContextFile,
 } from '../lib/payload.js';
@@ -53,6 +60,13 @@ interface SyncSummary {
   contextFilesPushed: number;
   claudeMdUpdated: boolean;
   npmUpdateRan: boolean;
+  // Workstream H — base plugin update counters. baseSkippedDueToCustomization
+  // is telemetry-only; never surfaced to the customer per locked product
+  // decision (customizations are invisible to mySecond).
+  baseSkillsUpdated: number;
+  baseAgentsUpdated: number;
+  baseWorkflowsUpdated: number;
+  baseSkippedDueToCustomization: number;
 }
 
 function emptySummary(): SyncSummary {
@@ -72,6 +86,10 @@ function emptySummary(): SyncSummary {
     contextFilesPushed: 0,
     claudeMdUpdated: false,
     npmUpdateRan: false,
+    baseSkillsUpdated: 0,
+    baseAgentsUpdated: 0,
+    baseWorkflowsUpdated: 0,
+    baseSkippedDueToCustomization: 0,
   };
 }
 
@@ -105,6 +123,75 @@ function syncCompanionFile(baseDir: string, file: CompanionFile): boolean {
   const local = readLocalFile(baseDir, file.file_path);
   if (local === file.content) return false;
   return writeLocalFile(baseDir, file.file_path, file.content);
+}
+
+// Workstream H: write a single base plugin file (skill/agent/workflow) into
+// the project, but ONLY if the customer hasn't customized it. Customization
+// detection: compare the local SHA to the SHA we recorded in install-state
+// the last time WE wrote the file. If they match → safe overwrite. If they
+// differ → SILENTLY skip per locked product decision; bump telemetry counter
+// for ops visibility.
+//
+// Returns 'updated' if we wrote, 'skipped-customized' if the local file
+// diverged from our last write, or 'unchanged' if local already matches the
+// new content.
+function syncBasePluginFile(
+  ctx: CommandContext,
+  file: BasePluginFile,
+  installState: InstallState
+): 'updated' | 'skipped-customized' | 'unchanged' {
+  const local = readLocalFile(ctx.rootDir, file.file_path);
+  const installTimeHash = installState.files[file.file_path];
+
+  // Fresh install OR file we've never seen — always write. The first time we
+  // touch a file, install-time hash IS the cloud hash (no customization
+  // possible yet). Same path serves the new-customer "no install-state.json
+  // yet" graceful initialization.
+  if (local === null || installTimeHash === undefined) {
+    if (local === file.content) {
+      installState.files[file.file_path] = file.current_hash;
+      return 'unchanged';
+    }
+    if (writeLocalFile(ctx.rootDir, file.file_path, file.content)) {
+      installState.files[file.file_path] = file.current_hash;
+      return 'updated';
+    }
+    return 'unchanged';
+  }
+
+  // Customization detection: did the customer edit our last-written copy?
+  const localHash = shortHash(local);
+  if (localHash !== installTimeHash) {
+    // Customer forked this skill — leave their edits alone. No notification,
+    // no log surfaced, no mention in printSummary. Bump the telemetry-only
+    // counter so we can see drift in aggregate without exposing it to
+    // individual customers.
+    return 'skipped-customized';
+  }
+
+  // Customer hasn't touched it. Safe to overwrite.
+  if (local === file.content) return 'unchanged';
+  if (writeLocalFile(ctx.rootDir, file.file_path, file.content)) {
+    installState.files[file.file_path] = file.current_hash;
+    return 'updated';
+  }
+  return 'unchanged';
+}
+
+function syncBaseTree(
+  ctx: CommandContext,
+  files: readonly BasePluginFile[] | undefined,
+  installState: InstallState
+): { updated: number; skipped: number } {
+  if (!files || files.length === 0) return { updated: 0, skipped: 0 };
+  let updated = 0;
+  let skipped = 0;
+  for (const f of files) {
+    const outcome = syncBasePluginFile(ctx, f, installState);
+    if (outcome === 'updated') updated++;
+    else if (outcome === 'skipped-customized') skipped++;
+  }
+  return { updated, skipped };
 }
 
 function mergeClaudeMdOverride(claudeMdPath: string, override: string): void {
@@ -202,6 +289,21 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
     if (parts.length > 0) {
       out.write(`mysecond: ${parts.join(', ')}\n`);
     }
+    // Workstream H: separate one-liner for base plugin updates so Claude (which
+    // reads this as session-start context) clearly distinguishes "your customs
+    // synced" from "mySecond shipped improvements." Customizations skipped
+    // silently — never mentioned. Link to /changelog so the customer can dig in.
+    const baseTotal =
+      summary.baseSkillsUpdated + summary.baseAgentsUpdated + summary.baseWorkflowsUpdated;
+    if (baseTotal > 0) {
+      const baseParts: string[] = [];
+      if (summary.baseSkillsUpdated > 0) baseParts.push(`${summary.baseSkillsUpdated} skills`);
+      if (summary.baseAgentsUpdated > 0) baseParts.push(`${summary.baseAgentsUpdated} agents`);
+      if (summary.baseWorkflowsUpdated > 0) baseParts.push(`${summary.baseWorkflowsUpdated} workflows`);
+      out.write(
+        `mysecond: ${baseParts.join(', ')} updated — see https://app.mysecond.ai/changelog\n`,
+      );
+    }
     return;
   }
 
@@ -219,11 +321,24 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   if (summary.artifactsPushed) parts.push(`${summary.artifactsPushed} artifacts pushed`);
   if (summary.contextFilesPushed) parts.push(`${summary.contextFilesPushed} context files pushed`);
   if (summary.claudeMdUpdated) parts.push('CLAUDE.md updated');
+  if (summary.baseSkillsUpdated)
+    parts.push(`${summary.baseSkillsUpdated} skills updated from mysecond.ai`);
+  if (summary.baseAgentsUpdated)
+    parts.push(`${summary.baseAgentsUpdated} agents updated from mysecond.ai`);
+  if (summary.baseWorkflowsUpdated)
+    parts.push(`${summary.baseWorkflowsUpdated} workflows updated from mysecond.ai`);
   if (parts.length === 0) parts.push('nothing changed');
 
   out.write(`✓ Sync complete: ${parts.join(', ')}.\n`);
   if (summary.conflictsCloudKept > 0 || summary.conflictsLocalKept > 0) {
     out.write(`  Recover backed-up versions from .claude/sync-conflicts/ if needed.\n`);
+  }
+  if (
+    summary.baseSkillsUpdated > 0 ||
+    summary.baseAgentsUpdated > 0 ||
+    summary.baseWorkflowsUpdated > 0
+  ) {
+    out.write(`  See what changed: https://app.mysecond.ai/changelog\n`);
   }
 }
 
@@ -280,13 +395,21 @@ export async function runSync(
     ? { timeoutMs: SILENT_SYNC_TIMEOUT_MS }
     : {};
 
+  // Workstream H: read install-state BEFORE the cliSync call so we can send
+  // the recorded base_plugin_version. Server uses it to decide whether to
+  // include base_skills/agents/workflows in the response.
+  const installState = readInstallState(ctx.rootDir);
+
   // CTO P1: context sync failure is partial-success, not a hard install failure.
   // Plugin install already succeeded at this point. Warn loudly + exit 0 so
   // the customer has a working PM OS (minus the context files), and knows to retry.
   // CTO BLOCKING-1: emit sync_failed telemetry with HTTP status for funnel analysis.
   let response: Awaited<ReturnType<typeof cliSync>>;
   try {
-    response = await cliSync(ctx, previousPaths, cliSyncOpts);
+    response = await cliSync(ctx, previousPaths, {
+      ...cliSyncOpts,
+      clientBasePluginVersion: installState.base_plugin_version,
+    });
   } catch (err) {
     const httpCode = err instanceof MysecondError ? err.exitCode : -1;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -340,6 +463,47 @@ export async function runSync(
   }
   for (const file of customWorkflows) {
     if (syncCompanionFile(paths.workflowsDir, file)) summary.workflowsUpdated++;
+  }
+
+  // Workstream H: pull base plugin updates (skills/agents/workflows from
+  // mysecond-ai/product-manager-os). The arrays are present only when the
+  // server determined we're behind. Per file: overwrite if customer hasn't
+  // touched it; silently skip otherwise. Update install-state for every
+  // successful overwrite, then persist the new base_plugin_version so the
+  // next sync starts from this point. base_plugin_version may legitimately
+  // be null on this response (server soft-failed) — only persist when we
+  // actually got a SHA back.
+  const skillsResult = syncBaseTree(ctx, response.base_skills, installState);
+  summary.baseSkillsUpdated += skillsResult.updated;
+  summary.baseSkippedDueToCustomization += skillsResult.skipped;
+
+  const agentsResult = syncBaseTree(ctx, response.base_agents, installState);
+  summary.baseAgentsUpdated += agentsResult.updated;
+  summary.baseSkippedDueToCustomization += agentsResult.skipped;
+
+  const workflowsResult = syncBaseTree(ctx, response.base_workflows, installState);
+  summary.baseWorkflowsUpdated += workflowsResult.updated;
+  summary.baseSkippedDueToCustomization += workflowsResult.skipped;
+
+  // Persist install-state if anything changed (new files written, hashes
+  // updated, or base_plugin_version advanced). Always safe to write — the
+  // file shape is stable.
+  if (typeof response.base_plugin_version === 'string') {
+    installState.base_plugin_version = response.base_plugin_version;
+  }
+  if (
+    skillsResult.updated > 0 ||
+    agentsResult.updated > 0 ||
+    workflowsResult.updated > 0 ||
+    typeof response.base_plugin_version === 'string'
+  ) {
+    try {
+      writeInstallState(ctx.rootDir, installState);
+    } catch {
+      // Soft-fail: install-state is optimization, not correctness. If we
+      // can't write it, next sync re-evaluates from current local SHAs and
+      // will likely re-write the same content (idempotent).
+    }
   }
 
   if (claudeMdOverride) {

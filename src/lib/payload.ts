@@ -27,6 +27,12 @@ export interface CompanionFile {
   content: string;
 }
 
+export interface BasePluginFile {
+  file_path: string;
+  content: string;
+  current_hash: string;
+}
+
 export interface CliSyncResponse {
   // Server may return either shape (legacy `files` or current `context_files`).
   context_files?: ContextFile[];
@@ -37,6 +43,16 @@ export interface CliSyncResponse {
   claude_md_override?: string | null;
   deleted_paths?: string[];
   syncedAt: string;
+  // Workstream H: base plugin update payload. `base_plugin_version` is the
+  // server's current HEAD SHA of mysecond-ai/product-manager-os; the cli
+  // persists it after each successful sync. The `base_skills` / `base_agents`
+  // / `base_workflows` arrays are present ONLY when the server determines the
+  // client is behind. Each file_path is project-relative (e.g.
+  // ".claude/skills/prd-generator/SKILL.md").
+  base_plugin_version?: string | null;
+  base_skills?: BasePluginFile[];
+  base_agents?: BasePluginFile[];
+  base_workflows?: BasePluginFile[];
   // Solo extensions (server authoritative; CLI sends nothing on cli-sync since
   // it's GET, but server may echo for debugging).
   workspace_scope?: 'solo' | 'team';

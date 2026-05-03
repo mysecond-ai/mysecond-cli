@@ -88,11 +88,18 @@ async function companionFetch(
 export async function cliSync(
   ctx: CommandContext,
   previousPaths: readonly string[],
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; clientBasePluginVersion?: string | null } = {}
 ): Promise<CliSyncResponse> {
   const query: Record<string, string | undefined> = {};
   if (previousPaths.length > 0) {
     query['previous_paths'] = previousPaths.join(',');
+  }
+  // Workstream H: tell the server which base plugin SHA we're installed at.
+  // Server returns base_skills/agents/workflows only when this differs from
+  // its current HEAD. New installs (no install-state.json yet) send no value
+  // and the server treats that as "fully behind".
+  if (opts.clientBasePluginVersion) {
+    query['client_base_plugin_version'] = opts.clientBasePluginVersion;
   }
   const response = await companionFetch(ctx, '/api/companion/cli-sync', {
     query,
