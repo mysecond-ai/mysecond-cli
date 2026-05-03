@@ -8,6 +8,7 @@ import {
   ARTIFACT_DIRS,
   classifyArtifactType,
   isContextFile,
+  scanArtifacts,
   scanContextFiles,
 } from '../../src/lib/payload.js';
 
@@ -70,6 +71,33 @@ describe('ARTIFACT_DIRS', () => {
     expect(classifyArtifactType('work/strategy/outputs/2026-05-01/competitive-profile.md')).toBe('strategy');
     expect(classifyArtifactType('work/discovery/outputs/2026-05-01/research.md')).toBe('research');
     expect(classifyArtifactType('work/launches/outputs/2026-05-01/launch-plan.md')).toBe('launch');
+  });
+
+  // When Claude writes to a non-canonical work area on its own (e.g. invents
+  // `work/product/` for release notes, or `work/retros/` for a retrospective),
+  // the file MUST still sync. The classifier returns 'other' for any
+  // `work/<area>/outputs/` path not in the canonical set, so the file is
+  // shipped to the server rather than silently dropped on the floor.
+  it('classifies non-canonical work areas as other (catch-all for Claude-invented folders)', () => {
+    expect(classifyArtifactType('work/product/outputs/2026-05-02/release-notes.md')).toBe('other');
+    expect(classifyArtifactType('work/retros/outputs/2026-05-02/q1-retro.md')).toBe('other');
+    expect(classifyArtifactType('work/anything/outputs/foo.md')).toBe('other');
+    // Case-insensitive parity with canonical paths.
+    expect(classifyArtifactType('Work/Product/Outputs/foo.md')).toBe('other');
+  });
+
+  it('rejects non-output paths under work/ (no silent .md sweep)', () => {
+    // Only `work/<area>/outputs/...md` syncs. Inputs, README files, and any
+    // other `work/<area>/` content stays local.
+    expect(classifyArtifactType('work/product/inputs/notes.md')).toBeNull();
+    expect(classifyArtifactType('work/product/README.md')).toBeNull();
+    expect(classifyArtifactType('work/specs/inputs/draft.md')).toBeNull();
+    expect(classifyArtifactType('work/notes.md')).toBeNull();
+  });
+
+  it('rejects non-.md files even under outputs/', () => {
+    expect(classifyArtifactType('work/product/outputs/data.json')).toBeNull();
+    expect(classifyArtifactType('work/product/outputs/image.png')).toBeNull();
   });
 });
 
@@ -203,5 +231,75 @@ describe('scanContextFiles', () => {
 
     const files = scanContextFiles(root);
     expect(files[0]?.content).toBe(original);
+  });
+});
+
+describe('scanArtifacts', () => {
+  function tmpProject(): string {
+    return mkdtempSync(join(tmpdir(), 'mysecond-artifact-scan-'));
+  }
+
+  it('returns [] when no work/ or canonical legacy dirs exist', () => {
+    expect(scanArtifacts(tmpProject())).toEqual([]);
+  });
+
+  it('walks canonical work/ activity-tree areas with their typed artifact_type', () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/specs/outputs/2026-05-02'), { recursive: true });
+    mkdirSync(join(root, 'work/strategy/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/specs/outputs/2026-05-02/prd.md'), '# PRD');
+    writeFileSync(join(root, 'work/strategy/outputs/comp.md'), '# Comp');
+
+    const found = scanArtifacts(root);
+    const byPath = Object.fromEntries(found.map((a) => [a.file_path, a.artifact_type]));
+    expect(byPath['work/specs/outputs/2026-05-02/prd.md']).toBe('prd');
+    expect(byPath['work/strategy/outputs/comp.md']).toBe('strategy');
+  });
+
+  // CRITICAL: when Claude invents a non-canonical work area on its own (e.g.
+  // work/product/, work/retros/), scanArtifacts must DISCOVER and walk it.
+  // Without this, SessionStart's full sweep silently drops every file Claude
+  // wrote to a non-canonical area between sessions — exactly the symptom Ron
+  // hit when /prd-generator routed an output to work/product/.
+  it('discovers and syncs non-canonical work areas (work/product/outputs, etc.)', () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/product/outputs/2026-05-02'), { recursive: true });
+    mkdirSync(join(root, 'work/retros/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/product/outputs/2026-05-02/release-notes.md'), '# v1.4');
+    writeFileSync(join(root, 'work/retros/outputs/q1.md'), '# Q1 retro');
+
+    const found = scanArtifacts(root);
+    const byPath = Object.fromEntries(found.map((a) => [a.file_path, a.artifact_type]));
+    expect(byPath['work/product/outputs/2026-05-02/release-notes.md']).toBe('other');
+    expect(byPath['work/retros/outputs/q1.md']).toBe('other');
+  });
+
+  it('does not walk non-outputs/ subdirectories of non-canonical work areas', () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/product/inputs'), { recursive: true });
+    writeFileSync(join(root, 'work/product/inputs/notes.md'), '# Local notes');
+    writeFileSync(join(root, 'work/product/README.md'), '# README');
+
+    const found = scanArtifacts(root);
+    expect(found).toEqual([]);
+  });
+
+  it('does not double-walk a canonical area when its dir exists on disk', () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/specs/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/specs/outputs/prd.md'), '# PRD');
+
+    const found = scanArtifacts(root);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.file_path).toBe('work/specs/outputs/prd.md');
+    expect(found[0]?.artifact_type).toBe('prd'); // canonical type, not 'other'
+  });
+
+  it('skips dotdirs at the work/ level', () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/.hidden/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/.hidden/outputs/secret.md'), 'leak');
+
+    expect(scanArtifacts(root)).toEqual([]);
   });
 });

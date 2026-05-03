@@ -74,17 +74,25 @@ export interface ArtifactDir {
   type: ArtifactType;
 }
 
-// Skills under content/skills/*/SKILL.md write outputs to `work/<area>/outputs/…`
-// (work/specs, work/discovery, work/strategy, work/launches). The `work/`
-// prefix is canonical — skills that wrote to bare `specs/outputs/…` were the
-// legacy pattern before the work/ activity-tree convention landed. Both
-// prefixed and unprefixed variants are accepted so any legacy customer
-// artifacts on disk keep syncing; canonical location is the work/ form.
+// Skills under content/skills/*/SKILL.md are configured to write outputs to
+// `work/<area>/outputs/…` for the four canonical activity areas (work/specs,
+// work/discovery, work/strategy, work/launches). The `work/` prefix is
+// canonical — skills that wrote to bare `specs/outputs/…` were the legacy
+// pattern before the work/ activity-tree convention landed. Both prefixed
+// and unprefixed variants are accepted so any legacy customer artifacts on
+// disk keep syncing; canonical location is the work/ form.
 //
 // Note `work/launches/outputs` (plural) matches what skills emit. The legacy
 // `launch/outputs` entry is a back-compat synonym.
+//
+// IMPORTANT: this list is a MAP of known paths to typed `artifact_type` values
+// for the four configured areas. It is NOT an allowlist of "what paths sync."
+// Any `work/<dir>/outputs/...md` path Claude writes to (even non-canonical
+// areas like `work/product/outputs/...` that Claude may invent on its own)
+// MUST sync — see classifyArtifactType + scanArtifacts below for the generic
+// catch-all that handles non-canonical work areas with type='other'.
 export const ARTIFACT_DIRS: readonly ArtifactDir[] = [
-  // Canonical work/ activity-tree paths (what every skill writes today)
+  // Canonical work/ activity-tree paths (what configured skills write today)
   { relativeDir: 'work/specs/outputs', type: 'prd' },
   { relativeDir: 'work/discovery/outputs', type: 'research' },
   { relativeDir: 'work/strategy/outputs', type: 'strategy' },
@@ -127,24 +135,55 @@ export function classifyArtifactType(relativePath: string): ArtifactType | null 
   // case-insensitive lookups must not produce silent drops.
   const lower = relativePath.toLowerCase();
   if (lower.includes('/tests/')) return null;
+  if (!lower.endsWith('.md')) return null;
+  // Match the canonical configured areas first to preserve their typed
+  // semantics (prd/research/strategy/launch). ARTIFACT_DIRS order matters —
+  // canonical work/ entries come before legacy unprefixed entries.
   for (const dir of ARTIFACT_DIRS) {
     if (lower.startsWith(dir.relativeDir.toLowerCase() + '/')) return dir.type;
   }
+  // Generic catch-all for any non-canonical work area Claude writes to on its
+  // own (e.g. work/product/outputs/release-notes.md, work/anything/outputs/x.md).
+  // The configured skills only target the four canonical areas, but Claude can
+  // and does invent its own folders during free-form work — those outputs MUST
+  // still sync to the Companion so they're never silently dropped.
+  if (/^work\/[^/]+\/outputs\//.test(lower)) return 'other';
   // Workflow outputs aren't in ARTIFACT_DIRS (they're scanned per-workflow not
   // per-tier), but the PostToolUse hook still classifies them.
   if (/^workflows\/[^/]+\/outputs\//.test(lower)) return 'other';
   return null;
 }
 
-// Walk ARTIFACT_DIRS under rootDir and produce payloads for every .md file.
+// Walk ARTIFACT_DIRS under rootDir + discover any non-canonical
+// `work/<area>/outputs/` folder Claude may have created on its own (e.g.
+// `work/product/outputs/`). Produce payloads for every .md file.
 // Pulled out of sync.ts so the artifact-source knowledge lives next to
 // ARTIFACT_DIRS + classifyArtifactType.
+//
+// Discovery rule: any `work/<area>/outputs/` directory that exists on disk
+// gets walked — typed via classifyArtifactType (canonical → real type;
+// non-canonical → 'other'). Dedup'd against ARTIFACT_DIRS by relativeDir so
+// the same canonical directory isn't walked twice.
 export function scanArtifacts(rootDir: string): ArtifactPayload[] {
   const found: ArtifactPayload[] = [];
+  const visited = new Set<string>();
   for (const entry of ARTIFACT_DIRS) {
     const dir = join(rootDir, entry.relativeDir);
     if (!existsSync(dir)) continue;
     walkArtifactDir(rootDir, dir, entry.type, found);
+    visited.add(entry.relativeDir);
+  }
+  // Discover non-canonical `work/<area>/outputs/` directories on disk.
+  const workRoot = join(rootDir, 'work');
+  if (existsSync(workRoot)) {
+    for (const areaEntry of readdirSync(workRoot, { withFileTypes: true })) {
+      if (!areaEntry.isDirectory() || areaEntry.name.startsWith('.')) continue;
+      const outputsRel = `work/${areaEntry.name}/outputs`;
+      if (visited.has(outputsRel)) continue;
+      const outputsDir = join(workRoot, areaEntry.name, 'outputs');
+      if (!existsSync(outputsDir)) continue;
+      walkArtifactDir(rootDir, outputsDir, 'other', found);
+    }
   }
   return found;
 }
