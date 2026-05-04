@@ -2,10 +2,17 @@
 // Copy redesigned May 2026 per launch-feedback-log: drop premature
 // /prd-generator + /enhance-context suggestions, lead with personalized line,
 // single primary CTA = `/welcome`. See `successBox()` in lib/copy.ts.
+//
+// Workstream B Day 5+ Item 5B: emits the `install_completed` JSON status
+// event with installCompleteClaudeMessage(email) as the message field. This
+// is the deferred-by-design Day 4 wiring — landed now so Claude Code Desktop's
+// chat surface (when invoking via hooks/--silent) gets a deterministic
+// post-install confirmation instead of paraphrasing the cli's terminal output.
 
-import { successBox } from '../copy.js';
+import { installCompleteClaudeMessage, successBox } from '../copy.js';
 import { countPluginContents } from '../plugin-counts.js';
 import { pluginExtractDir } from '../mysecond-paths.js';
+import { emitStatus } from '../silent-status.js';
 
 import type { StepFn } from './types.js';
 
@@ -27,5 +34,17 @@ export const step13: StepFn = async ({ ctx, shared }) => {
   if (!ctx.silent) {
     process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts) + '\n\n');
   }
+
+  // Emit install_completed JSON status event (Item 5B). shared.userEmail is
+  // populated by step-15 from /whoami; falls back to "you" if /whoami had a
+  // network error or didn't return an email field.
+  emitStatus({
+    kind: 'install_completed',
+    message: installCompleteClaudeMessage(shared.userEmail ?? 'you'),
+    skills_installed: shared.pluginCounts?.skills ?? 0,
+    agents_installed: shared.pluginCounts?.agents ?? 0,
+    workflows_installed: shared.pluginCounts?.workflows ?? 0,
+  });
+
   return { step: 13, outcome: { kind: 'completed' } };
 };

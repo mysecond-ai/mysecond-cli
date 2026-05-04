@@ -22,6 +22,10 @@ export interface StepContext {
     companyName?: string;
     customerSlug?: string;
     workspaceScope?: 'solo' | 'team';
+    // Step 15 populates from /whoami after device-code OAuth completes.
+    // Used by step-13 to emit the install_completed JSON status event with
+    // the customer's email in the message field.
+    userEmail?: string;
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;
     pluginSha256?: string;

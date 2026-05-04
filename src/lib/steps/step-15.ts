@@ -46,7 +46,7 @@ declare const __VERSION__: string;
 
 const WHOAMI_TIMEOUT_MS = 10_000;
 
-export const step15: StepFn = async ({ ctx }) => {
+export const step15: StepFn = async ({ ctx, shared }) => {
   // ── --resume: revoke first, then proceed to full flow ─────────────────
   if (ctx.resume) {
     if (ctx.apiKey.length > 0) {
@@ -61,13 +61,16 @@ export const step15: StepFn = async ({ ctx }) => {
       // Clear in-memory key so the post-revoke flow doesn't try to reuse it.
       (ctx as { apiKey: string }).apiKey = '';
     }
-    return runDeviceCodeFlow(ctx);
+    return runDeviceCodeFlow(ctx, shared);
   }
 
   // ── ctx.apiKey already populated → validate via /whoami ───────────────
   if (ctx.apiKey.length > 0) {
-    const whoamiOk = await validateExistingKey(ctx);
-    if (whoamiOk) {
+    // Item 5B: capture email here too so step-13 can emit install_completed
+    // with the customer's email even on the existing-credential-validated path.
+    const whoami = await fetchWhoami(ctx);
+    if (whoami.ok) {
+      if (whoami.email) shared.userEmail = whoami.email;
       return {
         step: 15,
         outcome: { kind: 'completed' },
@@ -86,12 +89,25 @@ export const step15: StepFn = async ({ ctx }) => {
     }
   }
 
-  return runDeviceCodeFlow(ctx);
+  return runDeviceCodeFlow(ctx, shared);
 };
 
 // ── /whoami validation ─────────────────────────────────────────────────────
 
-async function validateExistingKey(ctx: CommandContext): Promise<boolean> {
+/**
+ * Probe /whoami with the current apiKey. Three outcomes:
+ *   - { ok: true, email } — server returned 200; email captured for step-13.
+ *   - { ok: false, email: null } — server explicitly rejected (4xx/5xx);
+ *     caller should clear the key and re-authenticate.
+ *   - { ok: true, email: null, networkError: true } — network failure /
+ *     timeout. Don't lock the customer out on transient blips — trust the
+ *     existing key. Worst case the next sync surfaces a 401 and the
+ *     customer re-runs init then. Email is unknown so step-13 will fall
+ *     back to a generic post-install message.
+ */
+async function fetchWhoami(
+  ctx: CommandContext,
+): Promise<{ ok: boolean; email: string | null; networkError?: boolean }> {
   try {
     const url = new URL('/api/companion/whoami', ctx.apiBase);
     const response = await fetch(url, {
@@ -101,13 +117,13 @@ async function validateExistingKey(ctx: CommandContext): Promise<boolean> {
       },
       signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
     });
-    return response.status === 200;
+    if (response.status !== 200) return { ok: false, email: null };
+    const body = (await response.json().catch(() => null)) as { email?: string | null } | null;
+    return { ok: true, email: body?.email ?? null };
   } catch {
-    // Network error → don't lock customer out. Trust the existing key on
-    // network failure rather than force re-auth on every transient blip.
-    // Worst case: a revoked-but-cached token survives until the next
-    // network-up run, which is the same failure mode pre-Codex-fix.
-    return true;
+    // Network error / timeout — trust the existing key (preserves prior
+    // validateExistingKey behavior). Email unknown; step-13 falls back.
+    return { ok: true, email: null, networkError: true };
   }
 }
 
@@ -135,7 +151,8 @@ async function tryRevokeExistingToken(ctx: CommandContext): Promise<void> {
 // ── Full device-code flow ─────────────────────────────────────────────────
 
 async function runDeviceCodeFlow(
-  ctx: CommandContext
+  ctx: CommandContext,
+  shared: import('./types.js').StepContext['shared'],
 ): Promise<{ step: number; outcome: { kind: 'completed' }; message?: string }> {
   const installId = getOrCreateInstallId();
   const codeOpts = {
@@ -222,6 +239,15 @@ async function runDeviceCodeFlow(
 
   // Mutate ctx for downstream steps.
   (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
+
+  // Item 5B: capture email from /whoami so step-13 can emit the
+  // install_completed JSON status event with installCompleteClaudeMessage(email).
+  // Best-effort — if /whoami fails here, step-13 falls back to a generic
+  // post-install message.
+  const whoami = await fetchWhoami(ctx);
+  if (whoami.email) {
+    shared.userEmail = whoami.email;
+  }
 
   // Emit a keychain_write_failed status when we fell back due to round-trip
   // failure or write error (sandboxed-keychain edge case). Not a fatal
