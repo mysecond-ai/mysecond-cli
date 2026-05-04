@@ -14,6 +14,7 @@ import { step10 } from './step-10.js';
 import { step11 } from './step-11.js';
 import { step12 } from './step-12.js';
 import { step13 } from './step-13.js';
+import { step15 } from './step-15.js';
 
 import type { StepFn } from './types.js';
 
@@ -27,6 +28,14 @@ export interface StepEntry {
 }
 
 export const STEPS: readonly StepEntry[] = [
+  // Step 15 — device-code OAuth (Workstream B Phase 2a). Runs FIRST because
+  // every downstream step relies on ctx.apiKey being populated. Numbered 15
+  // out of order so the canonical 1..14 ledger identifiers stay stable for
+  // existing customers (runner iterates array order, not numeric order).
+  // Customers with a complete pre-WS-B ledger (1..14) re-running init will
+  // skip 1..14 and run step 15 once; step 15 itself is idempotent (validates
+  // existing key via /whoami, falls through to device-code only when needed).
+  { number: 15, fn: step15, mutates: true, description: 'Device-code OAuth (Workstream B)' },
   { number: 1, fn: step1, mutates: false, description: 'Validate project-dir + Node version' },
   { number: 2, fn: step2, mutates: false, description: '(removed in v1.5 — placeholder)' },
   { number: 3, fn: step3, mutates: false, description: '(removed in v1.5 — placeholder)' },

@@ -119,7 +119,27 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   loadDotenv(rootDir);
 
   const apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
-  const apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
+
+  // Codex P0-1: load device token from keychain at context-build time.
+  // The previous design read the token in step 15, but the runner skips
+  // completed steps on re-run — so once step 15 was marked done, ctx.apiKey
+  // would be empty on subsequent inits and step 4 (/install-ready) would
+  // 401. Sourcing here makes idempotent re-runs work correctly:
+  //   precedence: --api-key flag > COMPANION_API_KEY env > keychain/file
+  let apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
+  if (apiKey.length === 0) {
+    try {
+      // Lazy import to keep `mysecond --version` and `mysecond --help` fast
+      // (they don't need credentials).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getDeviceToken } = require('./keychain.js') as typeof import('./keychain.js');
+      const fromStorage = getDeviceToken(rootDir);
+      if (fromStorage !== null) apiKey = fromStorage.token;
+    } catch {
+      // Best-effort. If keychain lookup throws, fall through to empty
+      // apiKey; step 15 will run the device-code flow.
+    }
+  }
 
   // Strategy default: prompt if interactive (TTY) and not silent; cloud-wins otherwise.
   // CXO call (PR 4b design): keep customer in control where possible, default to safe

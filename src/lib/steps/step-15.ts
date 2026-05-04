@@ -1,0 +1,202 @@
+// Step 15: Device-code OAuth (Workstream B / Phase 2a Day 4).
+//
+// Runs FIRST in the step registry — before step 4's /install-ready poll —
+// because every downstream step relies on ctx.apiKey being populated. For
+// Workstream B customers, ctx.apiKey is the device-token bearer (msd_...);
+// it is acquired here when context-build time didn't already source one.
+//
+// Note: keychain/file token recovery happens at context-build time
+// (see context.ts buildContext). By the time this step runs, ctx.apiKey
+// is either:
+//   (a) empty — no credential anywhere; run device-code flow
+//   (b) populated — either a fresh-from-keychain device token, an env-var
+//       override, or a legacy companion_api_key
+//
+// Idempotency contract:
+//   - With --resume: REVOKE the existing token (if any) on the server
+//     before requesting a new code. Otherwise --resume is just "get a new
+//     token alongside" — the old one stays valid for ~90 days, which
+//     defeats the security purpose of --resume.
+//   - Without --resume + ctx.apiKey populated: validate against /whoami
+//     before trusting. A revoked token in .env would otherwise silently
+//     bypass device-code and customer would be stuck with a working
+//     ledger but failing API calls.
+//   - Without --resume + ctx.apiKey empty: run full device-code flow.
+//
+// Codex review fixes baked in: P0-1 (keychain read moved to buildContext),
+// P0-2 (whoami validation before trust), P0-4 (revoke on --resume).
+//
+// Brief: ~/.claude/plans/workstream-b-device-code-brief.md
+
+import {
+  pollForToken,
+  requestDeviceCode,
+  tryOpenBrowser,
+  getOrCreateInstallId,
+  DeviceCodeError,
+} from '../device-code.js';
+import { setDeviceToken } from '../keychain.js';
+import { MysecondError } from '../errors.js';
+
+import type { CommandContext } from '../context.js';
+import type { StepFn } from './types.js';
+
+declare const __VERSION__: string;
+
+const WHOAMI_TIMEOUT_MS = 10_000;
+
+export const step15: StepFn = async ({ ctx }) => {
+  // ── --resume: revoke first, then proceed to full flow ─────────────────
+  if (ctx.resume) {
+    if (ctx.apiKey.length > 0) {
+      await tryRevokeExistingToken(ctx);
+      // Clear in-memory key so the post-revoke flow doesn't try to reuse it.
+      (ctx as { apiKey: string }).apiKey = '';
+    }
+    return runDeviceCodeFlow(ctx);
+  }
+
+  // ── ctx.apiKey already populated → validate via /whoami ───────────────
+  if (ctx.apiKey.length > 0) {
+    const whoamiOk = await validateExistingKey(ctx);
+    if (whoamiOk) {
+      return {
+        step: 15,
+        outcome: { kind: 'completed' },
+        message: ctx.silent
+          ? undefined
+          : 'step 15: existing credential validated',
+      };
+    }
+    // Existing key didn't validate (revoked, expired, or unauthenticatable).
+    // Clear it and fall through to device-code flow.
+    (ctx as { apiKey: string }).apiKey = '';
+    if (!ctx.silent) {
+      process.stdout.write(
+        'step 15: existing credential rejected by server — re-authenticating\n'
+      );
+    }
+  }
+
+  return runDeviceCodeFlow(ctx);
+};
+
+// ── /whoami validation ─────────────────────────────────────────────────────
+
+async function validateExistingKey(ctx: CommandContext): Promise<boolean> {
+  try {
+    const url = new URL('/api/companion/whoami', ctx.apiBase);
+    const response = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${ctx.apiKey}`,
+        'user-agent': `mysecond-cli/${__VERSION__} (${process.platform}; node-${process.versions.node})`,
+      },
+      signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
+    });
+    return response.status === 200;
+  } catch {
+    // Network error → don't lock customer out. Trust the existing key on
+    // network failure rather than force re-auth on every transient blip.
+    // Worst case: a revoked-but-cached token survives until the next
+    // network-up run, which is the same failure mode pre-Codex-fix.
+    return true;
+  }
+}
+
+// ── /revoke (single-token bearer-authed) ───────────────────────────────────
+
+async function tryRevokeExistingToken(ctx: CommandContext): Promise<void> {
+  try {
+    const url = new URL('/api/companion/device/revoke', ctx.apiBase);
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${ctx.apiKey}`,
+        'user-agent': `mysecond-cli/${__VERSION__} (${process.platform}; node-${process.versions.node})`,
+      },
+      signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
+    });
+    // Don't fail the resume if revoke errors — best-effort. The new token
+    // we're about to mint is the security guarantee; the old token's
+    // continued validity is a smaller residual risk.
+  } catch {
+    // network error → fall through and continue with the resume.
+  }
+}
+
+// ── Full device-code flow ─────────────────────────────────────────────────
+
+async function runDeviceCodeFlow(
+  ctx: CommandContext
+): Promise<{ step: number; outcome: { kind: 'completed' }; message?: string }> {
+  const installId = getOrCreateInstallId();
+  const codeOpts = {
+    apiBase: ctx.apiBase,
+    cliVersion: __VERSION__,
+    installId,
+  };
+
+  let codeResp;
+  try {
+    codeResp = await requestDeviceCode(codeOpts);
+  } catch (err) {
+    if (err instanceof DeviceCodeError) {
+      throw new MysecondError(
+        1,
+        `Couldn't request a device code (${err.code}): ${err.message}`
+      );
+    }
+    throw err;
+  }
+
+  // CAIO #10: print URL to stdout BEFORE the open attempt. The chat is the
+  // deterministic surface; auto-open is best-effort.
+  if (!ctx.silent) {
+    process.stdout.write(
+      [
+        '',
+        'mySecond needs to verify your identity in a browser.',
+        '',
+        `  Code:  ${codeResp.user_code}`,
+        `  Open:  ${codeResp.verification_uri_complete}`,
+        '',
+        'Confirm the code matches what you see in the browser, then click Authorize.',
+        'Waiting for authorization...',
+        '',
+      ].join('\n')
+    );
+  }
+
+  // Best-effort browser open (after URL is already printed).
+  tryOpenBrowser(codeResp.verification_uri_complete);
+
+  // Poll until authorized or 540s cap.
+  let tokenResp;
+  try {
+    tokenResp = await pollForToken({
+      ...codeOpts,
+      deviceCode: codeResp.device_code,
+      intervalSeconds: codeResp.interval,
+    });
+  } catch (err) {
+    if (err instanceof DeviceCodeError) {
+      throw new MysecondError(
+        1,
+        `Device authorization failed (${err.code}): ${err.message}`
+      );
+    }
+    throw err;
+  }
+
+  // Persist the token (keychain on macOS, file fallback elsewhere).
+  setDeviceToken(ctx.rootDir, tokenResp.access_token);
+
+  // Mutate ctx for downstream steps.
+  (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
+
+  return {
+    step: 15,
+    outcome: { kind: 'completed' },
+    message: ctx.silent ? undefined : 'step 15: device authorized',
+  };
+}

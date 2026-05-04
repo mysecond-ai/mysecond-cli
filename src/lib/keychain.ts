@@ -201,6 +201,12 @@ export function setDeviceToken(
       // Round-trip verification.
       const readBack = macosKeychainGet(account);
       if (readBack === token) {
+        // Codex P1-1: when keychain write succeeds, ALSO delete any stale
+        // file-fallback. Otherwise: if a user later runs `security
+        // delete-generic-password ...` manually, getDeviceToken falls
+        // through to the file and returns the OLD (possibly-revoked)
+        // token. Single source of truth = keychain when keychain works.
+        fileDelete(absoluteProjectDir);
         return { storage: 'keychain' };
       }
       // Wrote something the keychain didn't return — fall through to file.

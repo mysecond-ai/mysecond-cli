@@ -253,10 +253,19 @@ function isTokenResponse(body: unknown): body is TokenResponse {
   if (typeof body !== 'object' || body === null) return false;
   const b = body as Record<string, unknown>;
   return (
+    // Codex P0-3: reject empty access_token. A buggy/compromised server
+    // returning {access_token: ""} would otherwise silently install an
+    // unusable credential ("installed but every API call fails").
     typeof b.access_token === 'string' &&
+    b.access_token.length > 0 &&
     typeof b.team_id === 'string' &&
+    b.team_id.length > 0 &&
     typeof b.user_id === 'string' &&
-    Array.isArray(b.scopes)
+    b.user_id.length > 0 &&
+    // Codex P1-4: validate scope element types. Array.isArray accepts any
+    // element shape; downstream `scopes.join(', ')` would throw on objects.
+    Array.isArray(b.scopes) &&
+    b.scopes.every((s: unknown) => typeof s === 'string')
   );
 }
 
