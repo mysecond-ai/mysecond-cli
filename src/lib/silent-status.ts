@@ -32,7 +32,8 @@ export type StatusKind =
   | 'install_step_completed'
   | 'install_completed'
   | 'install_failed'
-  | 'timeout';
+  | 'timeout'
+  | 'status_emit_failed'; // Codex pass 2 P1-4: fallback when JSON.stringify throws
 
 export interface StatusEvent {
   kind: StatusKind;
@@ -59,6 +60,11 @@ export function isSilentMode(): boolean {
  * normal `mysecond init` invocation doesn't pollute stdout with JSON).
  *
  * Errors are swallowed: status emission must never affect the install.
+ *
+ * Codex pass 2 P1-4: when JSON.stringify throws (circular ref, BigInt,
+ * etc.), emit a fallback `status_emit_failed` event so the chat client
+ * can still detect that an event was attempted. Silent drops break
+ * funnel completeness invisibly.
  */
 export function emitStatus(event: StatusEvent): void {
   if (!silentMode) return;
@@ -70,7 +76,20 @@ export function emitStatus(event: StatusEvent): void {
     };
     // Single line, terminated by exactly one newline. NO trailing whitespace.
     process.stdout.write(JSON.stringify(payload) + '\n');
-  } catch {
-    // best-effort
+  } catch (err) {
+    try {
+      process.stdout.write(
+        JSON.stringify({
+          mysecond_status_protocol_version: PROTOCOL_VERSION,
+          at: new Date().toISOString(),
+          kind: 'status_emit_failed',
+          attempted_kind: event.kind,
+          reason: err instanceof Error ? err.message : 'serialize_error',
+        }) + '\n'
+      );
+    } catch {
+      // truly best-effort — both serializations failed (impossible in
+      // practice, but never throw out of this function)
+    }
   }
 }

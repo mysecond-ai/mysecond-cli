@@ -35,7 +35,7 @@ import {
   getOrCreateInstallId,
   DeviceCodeError,
 } from '../device-code.js';
-import { setDeviceToken } from '../keychain.js';
+import { clearDeviceToken, setDeviceToken } from '../keychain.js';
 import { MysecondError } from '../errors.js';
 import { emitStatus } from '../silent-status.js';
 
@@ -51,6 +51,13 @@ export const step15: StepFn = async ({ ctx }) => {
   if (ctx.resume) {
     if (ctx.apiKey.length > 0) {
       await tryRevokeExistingToken(ctx);
+      // Codex pass 2 P1-3: clear the local cached token IMMEDIATELY after
+      // revoke. Without this, a cli crash between revoke and new-token
+      // mint would leave the keychain holding a now-revoked token. On
+      // recovery (without --resume), getDeviceToken would return that
+      // stale token, /whoami would 401, and the customer would see a
+      // confusing "credential rejected" message before re-auth fires.
+      clearDeviceToken(ctx.rootDir);
       // Clear in-memory key so the post-revoke flow doesn't try to reuse it.
       (ctx as { apiKey: string }).apiKey = '';
     }
