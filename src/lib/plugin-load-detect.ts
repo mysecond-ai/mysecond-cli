@@ -3,13 +3,21 @@
 // (soft-warn fallback) land in PR 4d (§7.3 admin-restricted disambiguation).
 //
 // Layer 1 checks the empirically-verified cache path captured in DV-2 (2026-04-22):
-// `~/.claude/plugins/cache/<marketplace-name>/pm-os/<version>/.claude-plugin/plugin.json`.
+// `~/.claude/plugins/cache/<marketplace-name>/<plugin-name>/<version>/.claude-plugin/plugin.json`.
 // `<version>` is wildcard-globbed when caller doesn't know the exact version.
+//
+// Workstream B Day 5+: parameterized on `pluginName` (was hardcoded `pm-os`).
+// PMO is now a multi-plugin marketplace; the launch-critical sentinel is
+// `pm-companion-sync` (carries the SessionStart + PostToolUse hooks).
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { installedPluginCacheParent, installedPluginManifestPath } from './mysecond-paths.js';
+import {
+  installedPluginCacheParent,
+  installedPluginManifestPath,
+  SENTINEL_PLUGIN_NAME,
+} from './mysecond-paths.js';
 
 export type LayerOneResult =
   | { found: true; version: string; manifestPath: string }
@@ -18,20 +26,25 @@ export type LayerOneResult =
 // Probe the canonical Layer 1 cache path. If `version` is provided, check the
 // exact path; otherwise glob under the parent dir for any version subdir
 // containing `.claude-plugin/plugin.json`.
+//
+// `pluginName` defaults to the sentinel (pm-companion-sync) — verifying its
+// presence is the load-bearing health check because it owns the sync hooks.
+// Other plugins can be probed by passing their name explicitly.
 export function probeLayerOne(
   slug: string,
-  version: string | null = null
+  version: string | null = null,
+  pluginName: string = SENTINEL_PLUGIN_NAME
 ): LayerOneResult {
   if (version !== null) {
-    const path = installedPluginManifestPath(slug, version);
+    const path = installedPluginManifestPath(slug, version, pluginName);
     if (existsSync(path)) {
       return { found: true, version, manifestPath: path };
     }
     return { found: false };
   }
 
-  // Wildcard: list version subdirs under `~/.claude/plugins/cache/<marketplace>/pm-os/`.
-  const parent = installedPluginCacheParent(slug);
+  // Wildcard: list version subdirs under `~/.claude/plugins/cache/<marketplace>/<plugin>/`.
+  const parent = installedPluginCacheParent(slug, pluginName);
   if (!existsSync(parent)) return { found: false };
 
   let entries: string[];

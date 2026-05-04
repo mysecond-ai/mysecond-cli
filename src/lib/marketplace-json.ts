@@ -3,7 +3,7 @@
 // `name + owner{name,email,url} + plugins[]` is the minimum that
 // `claude plugin marketplace add` accepts non-interactively.
 
-import { marketplaceName } from './mysecond-paths.js';
+import { marketplaceName, type PluginEntry } from './mysecond-paths.js';
 
 export interface MarketplaceJson {
   name: string;
@@ -20,7 +20,7 @@ export interface MarketplaceJson {
     description: string;
     version: string;
   };
-  plugins: Array<{ name: string; source: string }>;
+  plugins: PluginEntry[];
 }
 
 const OWNER = {
@@ -33,7 +33,23 @@ const MARKETPLACE_DESCRIPTION =
   'Your mySecond PM Operating System — context, skills, hooks, and agents tailored to your company.';
 const MARKETPLACE_VERSION = '1.0.0';
 
-export function buildMarketplaceJson(slug: string): MarketplaceJson {
+/**
+ * Build the customer-marketplace's outer marketplace.json.
+ *
+ * Workstream B Day 5+: previously hardcoded `[{name: 'pm-os', source: './plugin'}]`
+ * which silently overwrote PMO's tarball-internal manifest. PMO restructured
+ * to a multi-plugin marketplace (~11 sub-plugins including the launch-critical
+ * `pm-companion-sync`), so a single `pm-os` install was a no-op against the
+ * server's actual plugin shape.
+ *
+ * Source-of-truth is now the PMO tarball's own marketplace.json, read via
+ * `listMarketplacePluginsFromExtractDir()` and passed in here. This file
+ * becomes a thin wrapper that adds owner/metadata to the plugins[] array.
+ */
+export function buildMarketplaceJson(
+  slug: string,
+  plugins: PluginEntry[]
+): MarketplaceJson {
   return {
     name: marketplaceName(slug),
     owner: { ...OWNER },
@@ -41,7 +57,7 @@ export function buildMarketplaceJson(slug: string): MarketplaceJson {
       description: MARKETPLACE_DESCRIPTION,
       version: MARKETPLACE_VERSION,
     },
-    plugins: [{ name: 'pm-os', source: './plugin' }],
+    plugins,
   };
 }
 

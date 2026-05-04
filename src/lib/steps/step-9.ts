@@ -29,6 +29,7 @@ import {
 import { acquireMarketplaceLock } from '../marketplace-lock.js';
 import { buildMarketplaceJson, serializeMarketplaceJson } from '../marketplace-json.js';
 import {
+  listMarketplacePluginsFromExtractDir,
   marketplaceDir,
   marketplaceJsonPath,
   marketplaceName,
@@ -36,7 +37,9 @@ import {
   marketplaceTmpJsonPath,
   pluginInstallSpec,
   pluginTmpExtractDir,
+  SENTINEL_PLUGIN_NAME,
   validateSlug,
+  type PluginEntry,
 } from '../mysecond-paths.js';
 import { fetchAndExtractPlugin } from '../plugin-tarball.js';
 import { probeLayerOne } from '../plugin-load-detect.js';
@@ -188,8 +191,27 @@ async function doStep9(
     }
   }
 
-  // Sub-step (e): generate marketplace.json into the tmp tree, atomic rename.
-  const marketplaceJsonContent = serializeMarketplaceJson(buildMarketplaceJson(slug));
+  // Sub-step (e): read PMO's tarball-internal marketplace.json (source of
+  // truth for the multi-plugin layout), build the cli-side outer manifest
+  // wrapping its plugins[], atomic rename.
+  //
+  // CRITICAL ORDERING (CAIO Day 5+ review): list the plugins BEFORE the
+  // atomic rename. Reading from `pluginTmpExtractDir(slug)` gives us PMO's
+  // tarball-internal manifest. After atomic rename + further cli operations,
+  // the manifest at `marketplaceJsonPath(slug)` would be the cli-generated
+  // one — which previously hardcoded a single `pm-os` entry and silently
+  // dropped all 11 sub-plugins.
+  let plugins: PluginEntry[];
+  try {
+    plugins = listMarketplacePluginsFromExtractDir(tmpExtractDir);
+  } catch (err) {
+    rmSync(tmpMarketplaceDir, { recursive: true, force: true });
+    throw new MysecondError(
+      6,
+      `Couldn't read PMO marketplace manifest from extracted tarball: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const marketplaceJsonContent = serializeMarketplaceJson(buildMarketplaceJson(slug, plugins));
   const tmpMarketplaceJsonPath = marketplaceTmpJsonPath(slug);
   mkdirSync(join(tmpMarketplaceDir, '.claude-plugin'), { recursive: true });
   writeFileSync(tmpMarketplaceJsonPath, marketplaceJsonContent);
@@ -259,35 +281,64 @@ async function doStep9(
     );
   }
 
-  const installResult = spawnSync(
-    'claude',
-    ['plugin', 'install', pluginInstallSpec(slug), '--scope', 'user'],
-    { stdio: ctx.silent ? 'pipe' : 'inherit' }
-  );
-  // RED-TEAM R2 P1-A: ENOENT detection (same as marketplace add above).
-  if (installResult.error !== undefined && (installResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
-    throw new MysecondError(
-      6,
-      "Cannot find 'claude' binary on PATH (between marketplace add + plugin install). Re-run `mysecond init` from the same shell where `which claude` works."
+  // Install loop over all sub-plugins from PMO's marketplace (Workstream B
+  // Day 5+). Previously single-shot `claude plugin install pm-os@<m>` which
+  // silently no-op'd against PMO's multi-plugin layout. Now iterates the
+  // plugins[] read from PMO's manifest above. Tracks failures; hard-fails
+  // ONLY if the launch-critical sentinel (`pm-companion-sync`) doesn't land
+  // — other plugins may legitimately error out (corrupt sub-plugin, partial
+  // marketplace) without breaking the customer's core sync flow.
+  const failedPlugins: string[] = [];
+  for (const plugin of plugins) {
+    const spec = pluginInstallSpec(slug, plugin.name);
+    const installResult = spawnSync(
+      'claude',
+      ['plugin', 'install', spec, '--scope', 'user'],
+      { stdio: ctx.silent ? 'pipe' : 'inherit' }
     );
-  }
-  if (installResult.status !== 0) {
-    // RED-TEAM R2 P1-A: surface the actual exit value (could be null on
-    // ENOENT-during-execution, vs the early ENOENT branch above).
-    const exitDisplay = installResult.status ?? 'ENOENT';
-    throw new MysecondError(
-      6,
-      `claude plugin install ${pluginInstallSpec(slug)} failed (exit ${exitDisplay}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
-    );
+    // ENOENT on the binary is fatal regardless of which plugin in the loop
+    // hit it — PATH issue affects every plugin install.
+    if (installResult.error !== undefined && (installResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new MysecondError(
+        6,
+        "Cannot find 'claude' binary on PATH (between marketplace add + plugin install). Re-run `mysecond init` from the same shell where `which claude` works."
+      );
+    }
+    if (installResult.status !== 0) {
+      failedPlugins.push(plugin.name);
+      // Sentinel failure = hard stop. Without pm-companion-sync, the
+      // customer's PostToolUse + SessionStart hooks never fire and
+      // artifacts never sync to Companion — that's the core value prop.
+      if (plugin.name === SENTINEL_PLUGIN_NAME) {
+        const exitDisplay = installResult.status ?? 'ENOENT';
+        throw new MysecondError(
+          6,
+          `claude plugin install ${spec} failed (exit ${exitDisplay}). This is the launch-critical sync plugin; without it, your context files won't sync to mysecond.ai. Re-run \`mysecond init\` or contact support@mysecond.ai.`
+        );
+      }
+      // Non-sentinel failure: warn and continue. Customer's success box at
+      // step-13 reflects partial install via shared.failedPlugins.
+      if (!ctx.silent) {
+        process.stderr.write(
+          `  ⚠ skipped ${plugin.name} (claude plugin install exited ${installResult.status ?? 'ENOENT'})\n`
+        );
+      }
+    }
   }
 
-  // Post-install filesystem probe (CTO-8 carry — re-runs step 9 next
-  // invocation if plugin didn't actually land where we expect).
-  const probe = probeLayerOne(slug, meta.version);
+  // Surface partial-install state to step-13 for the success box.
+  if (failedPlugins.length > 0) {
+    shared.failedPlugins = failedPlugins;
+  }
+
+  // Post-install filesystem probe — verify the SENTINEL plugin landed where
+  // we expect (the launch-critical sync hooks). Other plugins are checked
+  // implicitly via the install-loop status codes above.
+  const probe = probeLayerOne(slug, meta.version, SENTINEL_PLUGIN_NAME);
   if (!probe.found) {
     throw new MysecondError(
       6,
-      `Plugin install reported success but ${marketplaceName(slug)}/pm-os/${meta.version} not in cache. Re-run \`mysecond init\` to retry.`
+      `Plugin install reported success but ${marketplaceName(slug)}/${SENTINEL_PLUGIN_NAME}/${meta.version} not in cache. Re-run \`mysecond init\` to retry.`
     );
   }
 
@@ -319,11 +370,27 @@ function tryFallback(
     rmSync(marketplaceTarget, { recursive: true, force: true });
     mkdirSync(marketplaceTarget, { recursive: true });
     // Copy the cached plugin tree into ./plugin/ + write a fresh marketplace.json.
-    cpSync(hit.source_dir, join(marketplaceTarget, 'plugin'), { recursive: true });
+    const restoredPluginDir = join(marketplaceTarget, 'plugin');
+    cpSync(hit.source_dir, restoredPluginDir, { recursive: true });
+
+    // Workstream B Day 5+: read PMO's manifest from the restored ./plugin/
+    // tree (mirrors step-9 main path) to populate the cli-side outer
+    // marketplace.json. Without this, the CTO-flagged fallback bug ships
+    // the legacy single `pm-os` shape and customers restored from LKG
+    // never get the multi-plugin install.
+    let plugins: PluginEntry[];
+    try {
+      plugins = listMarketplacePluginsFromExtractDir(restoredPluginDir);
+    } catch {
+      // LKG cache predates the multi-plugin manifest — can't restore safely
+      // without the plugins list. Treat as miss; main path will refetch
+      // (or surface its own error if network down too).
+      return null;
+    }
     mkdirSync(join(marketplaceTarget, '.claude-plugin'), { recursive: true });
     writeFileSync(
       marketplaceJsonPath(slug),
-      serializeMarketplaceJson(buildMarketplaceJson(slug))
+      serializeMarketplaceJson(buildMarketplaceJson(slug, plugins))
     );
 
     // Run marketplace add against the rehydrated dir (best-effort — if Claude
@@ -335,15 +402,23 @@ function tryFallback(
     );
     if (result.status !== 0) return null;
 
-    const installResult = spawnSync(
-      'claude',
-      ['plugin', 'install', pluginInstallSpec(slug), '--scope', 'user'],
-      { stdio: 'pipe' }
-    );
-    if (installResult.status !== 0) return null;
+    // Install loop over the LKG plugins. Same sentinel-fail-hard semantics
+    // as the main path: pm-companion-sync MUST install for fallback to count.
+    for (const plugin of plugins) {
+      const installResult = spawnSync(
+        'claude',
+        ['plugin', 'install', pluginInstallSpec(slug, plugin.name), '--scope', 'user'],
+        { stdio: 'pipe' }
+      );
+      if (installResult.status !== 0 && plugin.name === SENTINEL_PLUGIN_NAME) {
+        return null;
+      }
+      // Non-sentinel install failures during fallback are silent — customer
+      // is already in the degraded "stale cache" state and the banner explains.
+    }
 
-    // Probe for the cached version (which is what's now installed).
-    const probe = probeLayerOne(slug, hit.version);
+    // Probe for the cached version's sentinel plugin.
+    const probe = probeLayerOne(slug, hit.version, SENTINEL_PLUGIN_NAME);
     if (!probe.found) return null;
 
     return { version: hit.version, cachedAgeHours: hit.cached_age_hours };

@@ -29,6 +29,12 @@ export interface StepContext {
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;
     pluginSha256?: string;
+    // Workstream B Day 5+: sub-plugin install loop (multi-plugin PMO
+    // marketplace) tracks any non-sentinel plugins whose `claude plugin
+    // install` exited non-zero. Sentinel (pm-companion-sync) failure is
+    // hard-fail; non-sentinel failures degrade gracefully and surface here
+    // for step-13 to acknowledge in the success box.
+    failedPlugins?: string[];
     // Step 9 stale-cache fallback signaling — runner uses this to print the
     // banner from §6.2.B after the success box.
     staleCacheUsed?: { cachedAgeHours: number };

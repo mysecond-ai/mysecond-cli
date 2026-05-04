@@ -1,10 +1,14 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 import {
   installedPluginManifestPath,
+  listMarketplacePluginsFromExtractDir,
   isForbiddenProjectDir,
   marketplaceDir,
   marketplaceJsonPath,
@@ -45,12 +49,35 @@ describe('mysecond-paths (Decision 0-C cross-platform path handling)', () => {
     expect(marketplaceName('acme-a3f2')).toBe('mysecond-customer-acme-a3f2');
   });
 
-  it('pluginInstallSpec uses mysecond-customer- prefix per CAIO P0-2 fix', () => {
-    expect(pluginInstallSpec('acme-a3f2')).toBe('pm-os@mysecond-customer-acme-a3f2');
+  it('pluginInstallSpec uses mysecond-customer- prefix + parameterized plugin name (Workstream B Day 5+ multi-plugin)', () => {
+    expect(pluginInstallSpec('acme-a3f2', 'pm-companion-sync')).toBe(
+      'pm-companion-sync@mysecond-customer-acme-a3f2'
+    );
+    expect(pluginInstallSpec('acme-a3f2', 'pm-strategy')).toBe(
+      'pm-strategy@mysecond-customer-acme-a3f2'
+    );
   });
 
-  it('installedPluginManifestPath uses marketplace-name path segment per DV-2', () => {
-    // DV-2 captured: `~/.claude/plugins/cache/<marketplace-name>/pm-os/<version>/.claude-plugin/plugin.json`
+  it('installedPluginManifestPath uses marketplace-name + parameterized plugin segment (Workstream B Day 5+)', () => {
+    // DV-2 captured: `~/.claude/plugins/cache/<marketplace-name>/<plugin-name>/<version>/.claude-plugin/plugin.json`
+    // PMO restructured to multi-plugin marketplace; sentinel is now pm-companion-sync.
+    expect(installedPluginManifestPath('acme', '1.0.0', 'pm-companion-sync')).toBe(
+      join(
+        homedir(),
+        '.claude',
+        'plugins',
+        'cache',
+        'mysecond-customer-acme',
+        'pm-companion-sync',
+        '1.0.0',
+        '.claude-plugin',
+        'plugin.json'
+      )
+    );
+  });
+
+  it('installedPluginManifestPath defaults to sentinel plugin when name omitted', () => {
+    // Default arg = SENTINEL_PLUGIN_NAME = pm-companion-sync.
     expect(installedPluginManifestPath('acme', '1.0.0')).toBe(
       join(
         homedir(),
@@ -58,7 +85,7 @@ describe('mysecond-paths (Decision 0-C cross-platform path handling)', () => {
         'plugins',
         'cache',
         'mysecond-customer-acme',
-        'pm-os',
+        'pm-companion-sync',
         '1.0.0',
         '.claude-plugin',
         'plugin.json'
@@ -78,5 +105,88 @@ describe('mysecond-paths (Decision 0-C cross-platform path handling)', () => {
   it('isForbiddenProjectDir allows normal paths', () => {
     expect(isForbiddenProjectDir('/tmp/foo')).toBe(false);
     expect(isForbiddenProjectDir(join(homedir(), 'projects', 'my-pm-os'))).toBe(false);
+  });
+});
+
+describe('listMarketplacePluginsFromExtractDir (Workstream B Day 5+ multi-plugin)', () => {
+  // Each test creates a tmpdir, writes a fixture marketplace.json, and
+  // verifies the helper transforms PMO's source paths into the cli's
+  // outer marketplace dir layout.
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'mysecond-test-'));
+    mkdirSync(join(tmpRoot, '.claude-plugin'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('reads PMO manifest + transforms source paths to cli layout', () => {
+    writeFileSync(
+      join(tmpRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'product-manager-os',
+        plugins: [
+          { name: 'pm-companion-sync', source: './companion-sync' },
+          { name: 'pm-discovery', source: './discovery' },
+        ],
+      })
+    );
+
+    const out = listMarketplacePluginsFromExtractDir(tmpRoot);
+    expect(out).toEqual([
+      { name: 'pm-companion-sync', source: './plugin/companion-sync' },
+      { name: 'pm-discovery', source: './plugin/discovery' },
+    ]);
+  });
+
+  it('handles source paths without leading ./', () => {
+    writeFileSync(
+      join(tmpRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'product-manager-os',
+        plugins: [{ name: 'pm-foo', source: 'foo' }],
+      })
+    );
+
+    const out = listMarketplacePluginsFromExtractDir(tmpRoot);
+    expect(out).toEqual([{ name: 'pm-foo', source: './plugin/foo' }]);
+  });
+
+  it('throws if marketplace.json is missing', () => {
+    // No file written.
+    expect(() => listMarketplacePluginsFromExtractDir(tmpRoot)).toThrow();
+  });
+
+  it('throws if plugins[] is missing or empty', () => {
+    writeFileSync(
+      join(tmpRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({ name: 'product-manager-os', plugins: [] })
+    );
+    expect(() => listMarketplacePluginsFromExtractDir(tmpRoot)).toThrow(/no plugins/);
+  });
+
+  it('throws if marketplace.json is malformed JSON', () => {
+    writeFileSync(join(tmpRoot, '.claude-plugin', 'marketplace.json'), 'not-json{');
+    expect(() => listMarketplacePluginsFromExtractDir(tmpRoot)).toThrow();
+  });
+
+  it('filters out malformed plugin entries (missing name or source)', () => {
+    writeFileSync(
+      join(tmpRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'product-manager-os',
+        plugins: [
+          { name: 'pm-good', source: './good' },
+          { name: 'pm-no-source' }, // missing source
+          { source: './no-name' }, // missing name
+          null, // null entry
+        ],
+      })
+    );
+    const out = listMarketplacePluginsFromExtractDir(tmpRoot);
+    expect(out).toEqual([{ name: 'pm-good', source: './plugin/good' }]);
   });
 });
