@@ -93,12 +93,20 @@ function accountFor(absoluteProjectDir: string): string {
 // ── macOS keychain via `security` shell-out ────────────────────────────────
 
 function macosKeychainSet(account: string, token: string): void {
-  // -U updates if entry exists. -w sets the password from arg (vs prompting).
+  // -U updates if entry exists. -w with NO value reads the password from stdin
+  // (NOT as a positional arg) — this is the load-bearing security choice.
+  // Passing the token as a CLI arg ("-w <token>") leaks it via `ps aux` for
+  // the ~50-200ms duration of the security binary execution. CISO Day-2/3
+  // interim review (P1, blocks Day 4): use stdin so the token never appears
+  // in the process listing.
   // -s sets the service name (filterable in Keychain Access). -a sets account.
   execFileSync(
     'security',
-    ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', account, '-w', token],
-    { stdio: ['ignore', 'ignore', 'pipe'] }
+    ['add-generic-password', '-U', '-s', SERVICE_NAME, '-a', account, '-w'],
+    {
+      input: token,
+      stdio: ['pipe', 'ignore', 'pipe'],
+    }
   );
 }
 
