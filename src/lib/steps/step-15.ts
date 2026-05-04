@@ -162,8 +162,17 @@ async function runDeviceCodeFlow(
   // Day 5 pre-launch: user_code is NOT in the URL — customer types it
   // into the page's input form. Print the code prominently with a copy-
   // friendly hint so the customer knows where to find it.
+  //
+  // Day 5+ Item 5A (CAIO P0): write the device-code block to STDERR, not
+  // stdout. Node's process.stdout is block-buffered when piped (Claude Code
+  // Desktop's bash tool is a pipe), so a multi-line stdout.write can sit
+  // in the buffer for 30s-2min before the customer sees it. process.stderr
+  // is unbuffered by default when piped — the code surfaces in chat in ~5s.
+  // The trailing \n explicitly flushes the pipe.
+  // "Waiting for authorization..." stays on stdout — lower urgency, fine
+  // to buffer.
   if (!ctx.silent) {
-    process.stdout.write(
+    process.stderr.write(
       [
         '',
         'mySecond needs to authorize this device in your browser.',
@@ -172,10 +181,10 @@ async function runDeviceCodeFlow(
         `  Open:  ${codeResp.verification_uri_complete}`,
         '',
         'Type the code in the browser, then click Authorize.',
-        'Waiting for authorization...',
         '',
-      ].join('\n')
+      ].join('\n') + '\n'
     );
+    process.stdout.write('Waiting for authorization...\n');
   }
 
   // Silent JSON status: cli emits "device_code_minted" so the chat client

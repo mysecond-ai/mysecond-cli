@@ -21,7 +21,7 @@ describe('successBox: locked structure (May-2026 redesign)', () => {
       - Context sync hooks active for every Claude Code session
       - Your context files will be created in step 2 below
 
-      ALMOST THERE — close and reopen Claude Code to activate the plugin.
+      Install complete. Quit and reopen Claude Code to load mySecond.
 
       Then run /welcome in Claude Code. It takes about 5 minutes and sets up your context files for Acme Corp (company, product, personas, competitors, goals).
 
