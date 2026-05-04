@@ -159,20 +159,19 @@ async function runDeviceCodeFlow(
 
   // CAIO #10: print URL to stdout BEFORE the open attempt. The chat is the
   // deterministic surface; auto-open is best-effort.
-  // CXO Day 4: copy fixes — "authorize this device" (not "verify identity",
-  // which reads as SSO/OAuth jargon), and direction-correct verification
-  // wording ("In the browser, confirm the code matches the one above").
+  // Day 5 pre-launch: user_code is NOT in the URL — customer types it
+  // into the page's input form. Print the code prominently with a copy-
+  // friendly hint so the customer knows where to find it.
   if (!ctx.silent) {
     process.stdout.write(
       [
         '',
         'mySecond needs to authorize this device in your browser.',
         '',
-        `  Code:  ${codeResp.user_code}`,
-        '',
+        `  Code:  ${codeResp.user_code}    ← copy this`,
         `  Open:  ${codeResp.verification_uri_complete}`,
         '',
-        'In the browser, confirm the code matches the one above, then click Authorize.',
+        'Type the code in the browser, then click Authorize.',
         'Waiting for authorization...',
         '',
       ].join('\n')
