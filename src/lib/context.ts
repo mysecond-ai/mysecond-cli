@@ -17,6 +17,13 @@ export interface CommandContext {
   forceUpdate: boolean;
   fix: boolean;
   strategy: ConflictStrategy;
+  /**
+   * `mysecond init --resume` (Workstream B Phase 2a). When set, init re-runs
+   * the device-code OAuth step even if its ledger entry is marked complete,
+   * picking up an interrupted authorization. Other completed steps are still
+   * skipped; only the device-code step's idempotency is overridden.
+   */
+  resume: boolean;
 }
 
 export interface ParsedFlags {
@@ -26,6 +33,7 @@ export interface ParsedFlags {
   dryRun: boolean;
   forceUpdate: boolean;
   fix: boolean;
+  resume: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -40,6 +48,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     dryRun: false,
     forceUpdate: false,
     fix: false,
+    resume: false,
     strategy: null,
     positional: [],
   };
@@ -54,6 +63,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.forceUpdate = true;
     } else if (arg === '--fix') {
       out.fix = true;
+    } else if (arg === '--resume') {
+      out.resume = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -124,6 +135,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     dryRun: flags.dryRun,
     forceUpdate: flags.forceUpdate,
     fix: flags.fix,
+    resume: flags.resume,
     strategy,
   };
 }

@@ -4,6 +4,7 @@ import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { runWhereami } from './commands/whereami.js';
+import { runDoctor } from './commands/doctor.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
 import { exitFromError } from './lib/errors.js';
 
@@ -36,6 +37,11 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     summary: 'Print where this project\'s COMPANION_API_KEY is loaded from + the precedence chain.',
     run: runWhereami,
   },
+  {
+    name: 'doctor',
+    summary: 'Check install state + token health. Reports next-step command on any failure.',
+    run: runDoctor,
+  },
 ];
 
 function printHelp(): void {
@@ -58,6 +64,7 @@ function printHelp(): void {
     '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
     '  --force-update         Bypass the 24-hour npm-update timebox in sync',
     '  --fix                  Resolve init conflicts interactively (`mysecond init` only)',
+    '  --resume               Re-run device-code OAuth on a partial install (`mysecond init` only)',
     '',
     'Docs: https://mysecond.ai',
   ];
