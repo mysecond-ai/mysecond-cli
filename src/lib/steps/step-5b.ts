@@ -192,7 +192,9 @@ export const step5b: StepFn = async ({ ctx }) => {
     // (c) sub-millisecond timing. Accepted risk for v1.3.4; revisit if any
     // hardened-environment customer surfaces this.
     try {
-      atomicWriteFile(credsPath, `${ENV_KEY}=${newKey}\n`, { mode: 0o600 });
+      const apiUrl = ctx.apiBase || 'https://app.mysecond.ai';
+      const credsContent = `${ENV_KEY}=${newKey}\nCOMPANION_API_URL=${apiUrl}\n`;
+      atomicWriteFile(credsPath, credsContent, { mode: 0o600 });
     } catch (err) {
       emitWarning(
         ctx.silent,

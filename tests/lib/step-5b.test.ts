@@ -76,7 +76,9 @@ describe('step-5b — project-scoped credential write', () => {
       'credentials'
     );
     expect(existsSync(credsPath)).toBe(true);
-    expect(readFileSync(credsPath, 'utf8')).toBe(`COMPANION_API_KEY=${TEST_KEY}\n`);
+    expect(readFileSync(credsPath, 'utf8')).toBe(
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://app.mysecond.ai\n`
+    );
   });
 
   it('credential file is chmod 600', async () => {
@@ -118,7 +120,9 @@ describe('step-5b — project-scoped credential write', () => {
     // We don't strictly assert mtime didn't change (atomic-write rewrites
     // every time), but the test asserts no crash + content unchanged.
     expect(existsSync(credsPath)).toBe(true);
-    expect(readFileSync(credsPath, 'utf8')).toBe(`COMPANION_API_KEY=${TEST_KEY}\n`);
+    expect(readFileSync(credsPath, 'utf8')).toBe(
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://app.mysecond.ai\n`
+    );
   });
 
   it('drift case: project-scoped has DIFFERENT key — does NOT overwrite + warns', async () => {
@@ -136,6 +140,39 @@ describe('step-5b — project-scoped credential write', () => {
     // Warning was emitted to stderr.
     const warnings = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(warnings).toContain('different COMPANION_API_KEY');
+  });
+
+  it('T21: writes COMPANION_API_URL from ctx.apiBase override (staging)', async () => {
+    if (process.platform === 'win32') return;
+    const stagingUrl = 'https://staging-foo.example.com';
+    await step5b(makeStepCtx({ apiBase: stagingUrl }));
+
+    const credsPath = join(
+      tmpRoot,
+      '.mysecond',
+      'projects',
+      projectHash(projectDir),
+      'credentials'
+    );
+    const contents = readFileSync(credsPath, 'utf8');
+    expect(contents).toContain(`COMPANION_API_KEY=${TEST_KEY}`);
+    expect(contents).toContain(`COMPANION_API_URL=${stagingUrl}`);
+  });
+
+  it('T22: writes COMPANION_API_URL=prod default when ctx.apiBase is prod', async () => {
+    if (process.platform === 'win32') return;
+    await step5b(makeStepCtx());
+
+    const credsPath = join(
+      tmpRoot,
+      '.mysecond',
+      'projects',
+      projectHash(projectDir),
+      'credentials'
+    );
+    expect(readFileSync(credsPath, 'utf8')).toContain(
+      'COMPANION_API_URL=https://app.mysecond.ai'
+    );
   });
 });
 
