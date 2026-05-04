@@ -125,21 +125,60 @@ describe('step-5b — project-scoped credential write', () => {
     );
   });
 
-  it('drift case: project-scoped has DIFFERENT key — does NOT overwrite + warns', async () => {
+  it('key rotation: project-scoped has DIFFERENT key — DOES overwrite with new key + URL', async () => {
     if (process.platform === 'win32') return;
     const credsDir = join(tmpRoot, '.mysecond', 'projects', projectHash(projectDir));
     mkdirSync(credsDir, { recursive: true, mode: 0o700 });
     const credsPath = join(credsDir, 'credentials');
-    writeFileSync(credsPath, 'COMPANION_API_KEY=manually-edited-key\n', { mode: 0o600 });
+    writeFileSync(credsPath, 'COMPANION_API_KEY=old-key\n', { mode: 0o600 });
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
     await step5b(makeStepCtx());
 
-    // File still has the manually-edited value (no overwrite).
-    expect(readFileSync(credsPath, 'utf8')).toBe('COMPANION_API_KEY=manually-edited-key\n');
-    // Warning was emitted to stderr.
-    const warnings = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(warnings).toContain('different COMPANION_API_KEY');
+    // File is rewritten with new key + URL. Decision 0044: skipping on key
+    // rotation left customers stuck on stale URLs.
+    expect(readFileSync(credsPath, 'utf8')).toBe(
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://app.mysecond.ai\n`
+    );
+    // Rotation message emitted to stdout (info-level, not warning).
+    const stdout = stdoutSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stdout).toContain('Rotated COMPANION_API_KEY');
+  });
+
+  it('T23: backfill — existing creds with matching key but no URL — adds URL', async () => {
+    if (process.platform === 'win32') return;
+    // Simulate installed-base customer: ran OLD CLI (pre-fix), creds file has
+    // only COMPANION_API_KEY=. Re-running init must backfill the URL line.
+    const credsDir = join(tmpRoot, '.mysecond', 'projects', projectHash(projectDir));
+    mkdirSync(credsDir, { recursive: true, mode: 0o700 });
+    const credsPath = join(credsDir, 'credentials');
+    writeFileSync(credsPath, `COMPANION_API_KEY=${TEST_KEY}\n`, { mode: 0o600 });
+
+    await step5b(makeStepCtx());
+
+    expect(readFileSync(credsPath, 'utf8')).toBe(
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://app.mysecond.ai\n`
+    );
+  });
+
+  it('T24: existing creds with stale URL — overwrites URL on re-init with different apiBase', async () => {
+    if (process.platform === 'win32') return;
+    // Customer first installed against staging, then re-inits against prod.
+    // New apiBase wins — they should not stay stuck on the stale URL.
+    const credsDir = join(tmpRoot, '.mysecond', 'projects', projectHash(projectDir));
+    mkdirSync(credsDir, { recursive: true, mode: 0o700 });
+    const credsPath = join(credsDir, 'credentials');
+    writeFileSync(
+      credsPath,
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://staging-old.example.com\n`,
+      { mode: 0o600 }
+    );
+
+    await step5b(makeStepCtx({ apiBase: 'https://prod-new.example.com' }));
+
+    expect(readFileSync(credsPath, 'utf8')).toBe(
+      `COMPANION_API_KEY=${TEST_KEY}\nCOMPANION_API_URL=https://prod-new.example.com\n`
+    );
   });
 
   it('T21: writes COMPANION_API_URL from ctx.apiBase override (staging)', async () => {

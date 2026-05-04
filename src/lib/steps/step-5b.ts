@@ -169,18 +169,40 @@ export const step5b: StepFn = async ({ ctx }) => {
   const isMigration =
     !existing.hasKey && existsSync(join(ctx.rootDir, '.env'));
 
-  // Idempotent: if project-scoped already has the right key, skip the write.
-  if (existing.hasKey && existing.currentValue === newKey) {
-    // Still run the gitignore guard below — that's not idempotency-gated.
-  } else if (existing.hasKey && existing.currentValue !== newKey) {
-    // Drift case: project-scoped has a DIFFERENT key. Don't overwrite;
-    // assume the customer manually edited. Hook's dual-creds warning
-    // (shipped in product-manager-os PR #13) will surface the mismatch.
-    emitWarning(
-      ctx.silent,
-      `[mysecond] ⚠️ ${credsPath} has a different COMPANION_API_KEY than the one provided. Skipping overwrite — manual edit assumed. Run \`mysecond whereami\` to inspect, or delete the file to let init re-write.`
-    );
+  // Desired on-disk content. ctx.apiBase is always populated by buildContext()
+  // (src/lib/context.ts) — env var COMPANION_API_URL || prod default.
+  const wantContent = `${ENV_KEY}=${newKey}\nCOMPANION_API_URL=${ctx.apiBase}\n`;
+
+  // Read raw on-disk content for full-content comparison (catches URL drift,
+  // missing URL line, stale URL — not just key match).
+  let onDiskContent: string | null = null;
+  if (existsSync(credsPath)) {
+    try {
+      onDiskContent = readFileSync(credsPath, 'utf8');
+    } catch {
+      // unreadable — treat as needs-write
+    }
+  }
+
+  // True idempotent: file exactly matches desired content.
+  if (onDiskContent === wantContent) {
+    // No-op. Still run the gitignore guard below.
   } else {
+    // Three sub-cases for messaging:
+    //   1. Key rotation: existing.hasKey && existing.currentValue !== newKey
+    //      Previously skipped + warned "manual edit assumed". Changed because
+    //      skipping left customers stuck on stale URLs from prior init runs
+    //      (decision 0044 — staging customer issued token from staging Supabase
+    //      but creds file was missing COMPANION_API_URL → hook defaulted to
+    //      prod → silent 401).
+    //   2. Content backfill: existing.hasKey && existing.currentValue === newKey
+    //      but on-disk content differs (URL missing, URL stale). This is the
+    //      installed-base recovery path: customers who ran old CLI re-run
+    //      init and get URL written without rotating the key.
+    //   3. Fresh write: !existing.hasKey
+    const isKeyRotation = existing.hasKey && existing.currentValue !== newKey;
+    const isContentBackfill = existing.hasKey && existing.currentValue === newKey;
+
     // Write (atomic via temp+rename) with mode 0o600.
     //
     // Note: atomicWriteFile uses a deterministic temp filename
@@ -192,9 +214,7 @@ export const step5b: StepFn = async ({ ctx }) => {
     // (c) sub-millisecond timing. Accepted risk for v1.3.4; revisit if any
     // hardened-environment customer surfaces this.
     try {
-      const apiUrl = ctx.apiBase || 'https://app.mysecond.ai';
-      const credsContent = `${ENV_KEY}=${newKey}\nCOMPANION_API_URL=${apiUrl}\n`;
-      atomicWriteFile(credsPath, credsContent, { mode: 0o600 });
+      atomicWriteFile(credsPath, wantContent, { mode: 0o600 });
     } catch (err) {
       emitWarning(
         ctx.silent,
@@ -217,7 +237,17 @@ export const step5b: StepFn = async ({ ctx }) => {
       // statSync errors are non-fatal here — ignore.
     }
 
-    if (isMigration) {
+    if (isKeyRotation) {
+      emit(
+        ctx.silent,
+        `[mysecond] Rotated COMPANION_API_KEY in project-scoped credentials. Run \`mysecond whereami\` to inspect.`
+      );
+    } else if (isContentBackfill) {
+      emit(
+        ctx.silent,
+        '[mysecond] Updated project-scoped credentials with COMPANION_API_URL.'
+      );
+    } else if (isMigration) {
       emit(
         ctx.silent,
         '[mysecond] Secured your API key: moved out of .env (which can be committed to git) into a global file. Run `mysecond whereami` to see where your credentials live.'
