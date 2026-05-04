@@ -5,6 +5,7 @@ import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { runWhereami } from './commands/whereami.js';
 import { runDoctor } from './commands/doctor.js';
+import { setSilentMode } from './lib/silent-status.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
 import { exitFromError } from './lib/errors.js';
 
@@ -96,6 +97,9 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   try {
     const flags = parseGlobalFlags(args.slice(1));
+    // Workstream B Day 4: enable structured JSON status protocol when --silent.
+    // Emissions before this call are no-ops, so order matters — set first.
+    setSilentMode(flags.silent);
     const ctx = buildContext(flags);
     return await match.run(flags.positional, ctx);
   } catch (err) {

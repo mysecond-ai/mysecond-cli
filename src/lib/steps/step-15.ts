@@ -37,6 +37,7 @@ import {
 } from '../device-code.js';
 import { setDeviceToken } from '../keychain.js';
 import { MysecondError } from '../errors.js';
+import { emitStatus } from '../silent-status.js';
 
 import type { CommandContext } from '../context.js';
 import type { StepFn } from './types.js';
@@ -167,6 +168,15 @@ async function runDeviceCodeFlow(
     );
   }
 
+  // Silent JSON status: cli emits "device_code_minted" so the chat client
+  // can render its own waiting UI without parsing prose stdout.
+  emitStatus({
+    kind: 'device_code_minted',
+    user_code: codeResp.user_code,
+    verification_uri: codeResp.verification_uri,
+    expires_in: codeResp.expires_in,
+  });
+
   // Best-effort browser open (after URL is already printed).
   tryOpenBrowser(codeResp.verification_uri_complete);
 
@@ -189,10 +199,16 @@ async function runDeviceCodeFlow(
   }
 
   // Persist the token (keychain on macOS, file fallback elsewhere).
-  setDeviceToken(ctx.rootDir, tokenResp.access_token);
+  const setResult = setDeviceToken(ctx.rootDir, tokenResp.access_token);
 
   // Mutate ctx for downstream steps.
   (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
+
+  emitStatus({
+    kind: 'device_authorized',
+    token_storage: setResult.storage,
+    keychain_unavailable_reason: setResult.fallbackReason ?? null,
+  });
 
   return {
     step: 15,
