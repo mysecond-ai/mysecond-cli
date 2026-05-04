@@ -28,6 +28,7 @@ export type StatusKind =
   | 'device_code_minted'
   | 'awaiting_authorization'
   | 'device_authorized'
+  | 'keychain_write_failed' // CAIO Day 4: discriminable from generic install_failed
   | 'install_step_completed'
   | 'install_completed'
   | 'install_failed'

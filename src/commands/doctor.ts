@@ -95,9 +95,12 @@ export async function runDoctor(
         pingError = 'whoami returned malformed response';
       }
     } else if (response.status === 401) {
-      pingError = 'token rejected (401) — token may have been revoked';
+      // CXO Day 4: customer-facing copy. Don't expose status code or
+      // internal "revoked" jargon — name the cause + recovery in plain
+      // English.
+      pingError = 'Your device was disconnected. Run `mysecond init --resume` to reconnect.';
     } else {
-      pingError = `whoami returned status ${response.status}`;
+      pingError = `Connection check failed (status ${response.status}). Try again, or run \`mysecond init --resume\` if it persists.`;
     }
   } catch (err) {
     pingError =
@@ -110,7 +113,7 @@ export async function runDoctor(
   const lines: string[] = ['Status: installed.', ''];
   lines.push(`  cli version:          ${__VERSION__}`);
   lines.push(`  install state:        ${installStatePath}`);
-  lines.push(`  base_plugin_version:  ${state.base_plugin_version ?? '(none — first sync pending)'}`);
+  lines.push(`  base_plugin_version:  ${state.base_plugin_version ?? 'not yet synced'}`);
   lines.push(`  files tracked:        ${Object.keys(state.files).length}`);
   lines.push(`  token storage:        ${tokenResult.storage}`);
 

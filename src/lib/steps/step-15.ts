@@ -152,16 +152,20 @@ async function runDeviceCodeFlow(
 
   // CAIO #10: print URL to stdout BEFORE the open attempt. The chat is the
   // deterministic surface; auto-open is best-effort.
+  // CXO Day 4: copy fixes — "authorize this device" (not "verify identity",
+  // which reads as SSO/OAuth jargon), and direction-correct verification
+  // wording ("In the browser, confirm the code matches the one above").
   if (!ctx.silent) {
     process.stdout.write(
       [
         '',
-        'mySecond needs to verify your identity in a browser.',
+        'mySecond needs to authorize this device in your browser.',
         '',
         `  Code:  ${codeResp.user_code}`,
+        '',
         `  Open:  ${codeResp.verification_uri_complete}`,
         '',
-        'Confirm the code matches what you see in the browser, then click Authorize.',
+        'In the browser, confirm the code matches the one above, then click Authorize.',
         'Waiting for authorization...',
         '',
       ].join('\n')
@@ -204,11 +208,35 @@ async function runDeviceCodeFlow(
   // Mutate ctx for downstream steps.
   (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
 
+  // Emit a keychain_write_failed status when we fell back due to round-trip
+  // failure or write error (sandboxed-keychain edge case). Not a fatal
+  // condition — file fallback is a working credential — but worth a
+  // discriminable event so support can detect a sandboxed-keychain pattern
+  // in PostHog without grepping logs (CAIO Day 4).
+  if (
+    setResult.fallbackReason === 'roundtrip_failed' ||
+    setResult.fallbackReason === 'write_failed'
+  ) {
+    emitStatus({
+      kind: 'keychain_write_failed',
+      reason: setResult.fallbackReason,
+    });
+  }
+
   emitStatus({
     kind: 'device_authorized',
     token_storage: setResult.storage,
     keychain_unavailable_reason: setResult.fallbackReason ?? null,
   });
+
+  // CXO Day 4: parallel non-silent success line so the customer in their
+  // terminal sees an explicit "✓ authorized" instead of just "step 15:
+  // device authorized" (which doesn't tell them what to do next).
+  if (!ctx.silent) {
+    process.stdout.write(
+      '\n  ✓ Device authorized. Quit and reopen Claude Code to load the mySecond plugin — your install will continue automatically.\n\n'
+    );
+  }
 
   return {
     step: 15,

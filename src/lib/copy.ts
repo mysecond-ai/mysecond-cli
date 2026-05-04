@@ -80,6 +80,27 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
 export const CLAUDE_MD_MARKER_START = '<!-- mysecond-start -->';
 export const CLAUDE_MD_MARKER_END = '<!-- mysecond-end -->';
 
+// CAIO #6 (Workstream B Phase 2a Day 4): the EPHEMERAL install-completion
+// message Claude Code surfaces in chat after the --silent cli exits. This
+// is DISTINCT from the persistent claudeMdBlock above (which lives in
+// CLAUDE.md and contains @import + skill-discovery instructions).
+//
+// The 3-line spec is locked: any change requires CAIO review. Stay under
+// 1KB total — Anthropic enforces a 10,000-char cap on additionalContext/
+// systemMessage/stdout per code.claude.com/docs/en/hooks. Single
+// interpolation: `<email>`. NO other variables.
+//
+// Emitted by the cli's install_completed JSON status event (Day 5 wiring)
+// or surfaced via the SessionStart hook on first post-install session.
+export function installCompleteClaudeMessage(email: string): string {
+  return [
+    '## mySecond installed',
+    `- Connected as: ${email}`,
+    '- Run /mysecond:welcome to set up your PM Operating System.',
+    '- Run mysecond doctor if anything looks off.',
+  ].join('\n');
+}
+
 // §6.8 post-install success message (May-2026 redesign per launch-feedback-log).
 // Plain-text, single primary CTA = `/welcome`. Drops premature suggestions for
 // /prd-generator + /enhance-context (customer has no context files yet).
