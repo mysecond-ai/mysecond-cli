@@ -334,11 +334,14 @@ async function doStep9(
   // Post-install filesystem probe — verify the SENTINEL plugin landed where
   // we expect (the launch-critical sync hooks). Other plugins are checked
   // implicitly via the install-loop status codes above.
-  const probe = probeLayerOne(slug, meta.version, SENTINEL_PLUGIN_NAME);
+  // Pass null for version so we match by plugin name only — Claude Code
+  // installs at its own version (e.g. 1.0.0 from plugin.json) which differs
+  // from the regen-timestamp version in meta. Any installed version passes.
+  const probe = probeLayerOne(slug, null, SENTINEL_PLUGIN_NAME);
   if (!probe.found) {
     throw new MysecondError(
       6,
-      `Plugin install reported success but ${marketplaceName(slug)}/${SENTINEL_PLUGIN_NAME}/${meta.version} not in cache. Re-run \`mysecond init\` to retry.`
+      `Plugin install reported success but ${marketplaceName(slug)}/${SENTINEL_PLUGIN_NAME} not found in cache. Re-run \`mysecond init\` to retry.`
     );
   }
 
@@ -417,8 +420,9 @@ function tryFallback(
       // is already in the degraded "stale cache" state and the banner explains.
     }
 
-    // Probe for the cached version's sentinel plugin.
-    const probe = probeLayerOne(slug, hit.version, SENTINEL_PLUGIN_NAME);
+    // Probe for the sentinel plugin by name only (version-agnostic — Claude Code
+    // installs at plugin.json version which may differ from the cached version).
+    const probe = probeLayerOne(slug, null, SENTINEL_PLUGIN_NAME);
     if (!probe.found) return null;
 
     return { version: hit.version, cachedAgeHours: hit.cached_age_hours };

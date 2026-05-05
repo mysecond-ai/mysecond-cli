@@ -31,7 +31,6 @@
 import {
   pollForToken,
   requestDeviceCode,
-  tryOpenBrowser,
   getOrCreateInstallId,
   DeviceCodeError,
 } from '../device-code.js';
@@ -212,9 +211,6 @@ async function runDeviceCodeFlow(
     verification_uri: codeResp.verification_uri,
     expires_in: codeResp.expires_in,
   });
-
-  // Best-effort browser open (after URL is already printed).
-  tryOpenBrowser(codeResp.verification_uri_complete);
 
   // Poll until authorized or 540s cap.
   let tokenResp;
