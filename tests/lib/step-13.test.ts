@@ -84,6 +84,8 @@ describe('step-13: install_completed JSON status event', () => {
     expect(completed.agents_installed).toBe(6);
     expect(completed.workflows_installed).toBe(4);
     expect(completed.mysecond_status_protocol_version).toBe(1);
+    // Protocol contract: `at` must be an ISO 8601 timestamp.
+    expect(completed.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('falls back to "you" when shared.userEmail is missing', async () => {
@@ -126,6 +128,10 @@ describe('step-13: install_completed JSON status event', () => {
     );
     expect(completed).toBeTruthy();
     expect(completed.mysecond_status_protocol_version).toBe(1);
+    // Count fields must be wired on the non-silent path too.
+    expect(completed.skills_installed).toBe(91);
+    expect(completed.agents_installed).toBe(6);
+    expect(completed.workflows_installed).toBe(4);
 
     // install_started must NOT appear in interactive mode (emitStatus is still
     // silent-only — only install_completed bypasses the gate).

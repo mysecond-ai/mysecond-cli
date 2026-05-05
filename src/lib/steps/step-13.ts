@@ -39,8 +39,8 @@ export const step13: StepFn = async ({ ctx, shared }) => {
   // emitInstallCompleted (not emitStatus) so this event always reaches stdout
   // regardless of --silent mode — it is the deterministic "done" signal the
   // Claude Code Desktop chat assistant needs to stop its watcher loop.
-  // The blank line between the success box and this JSON is written inside
-  // emitInstallCompleted itself.
+  // The '\n\n' above (after successBox) is what separates the success box from
+  // this JSON line — emitInstallCompleted does not add leading whitespace.
   // shared.userEmail is populated by step-15 from /whoami; falls back to
   // "you" if /whoami had a network error or didn't return an email field.
   emitInstallCompleted({

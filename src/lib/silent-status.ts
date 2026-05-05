@@ -103,8 +103,9 @@ export function emitStatus(event: StatusEvent): void {
  * silent-mode gate so interactive installs (Bash-invoked, not hook-invoked)
  * also emit it.
  *
- * A blank line is written before the JSON so it appears visually separated
- * from the success box prose above it.
+ * This function emits exactly one JSON line to stdout. It does NOT write a
+ * blank line before the JSON — that separation is the caller's responsibility
+ * (step-13 writes '\n\n' after the success box, before calling this).
  *
  * Errors are swallowed — same contract as emitStatus.
  */
@@ -120,6 +121,10 @@ export function emitInstallCompleted(event: StatusEvent): void {
     // and this JSON line — emitInstallCompleted does not add leading whitespace.
     process.stdout.write(JSON.stringify(payload) + '\n');
   } catch (err) {
+    // Only emit the status_emit_failed fallback in silent mode. In interactive
+    // mode, surfacing raw JSON on a serialize failure would be confusing to the
+    // user; swallowing is the safer degradation.
+    if (!silentMode) return;
     try {
       process.stdout.write(
         JSON.stringify({
