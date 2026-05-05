@@ -18,7 +18,6 @@
 //
 // Brief: ~/.claude/plans/workstream-b-device-code-brief.md
 
-import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -271,35 +270,3 @@ function isTokenResponse(body: unknown): body is TokenResponse {
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
-
-// ── Browser open (best-effort) ─────────────────────────────────────────────
-
-/**
- * Attempt to open `url` in the user's default browser. Best-effort: returns
- * false if the spawn fails. The caller MUST have already printed the URL to
- * stdout per CAIO #10 — never rely on auto-open to be the only surface.
- */
-export function tryOpenBrowser(url: string): boolean {
-  let cmd: string;
-  let args: string[];
-  if (process.platform === 'darwin') {
-    cmd = 'open';
-    args = [url];
-  } else if (process.platform === 'win32') {
-    cmd = 'cmd';
-    args = ['/c', 'start', '""', url];
-  } else {
-    cmd = 'xdg-open';
-    args = [url];
-  }
-  try {
-    const child = spawn(cmd, args, {
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
