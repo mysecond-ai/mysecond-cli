@@ -93,3 +93,45 @@ export function emitStatus(event: StatusEvent): void {
     }
   }
 }
+
+/**
+ * Emit the install_completed event ALWAYS — regardless of silentMode.
+ *
+ * All other events are silent-only (chat hooks need clean stdout). This
+ * event is the deterministic "done" signal the Claude Code Desktop chat
+ * assistant needs to stop watching for completion. It must escape the
+ * silent-mode gate so interactive installs (Bash-invoked, not hook-invoked)
+ * also emit it.
+ *
+ * A blank line is written before the JSON so it appears visually separated
+ * from the success box prose above it.
+ *
+ * Errors are swallowed — same contract as emitStatus.
+ */
+export function emitInstallCompleted(event: StatusEvent): void {
+  try {
+    const payload = {
+      mysecond_status_protocol_version: PROTOCOL_VERSION,
+      at: new Date().toISOString(),
+      ...event,
+    };
+    // Single line, terminated by exactly one newline. The caller (step-13)
+    // is responsible for writing the blank line between the success box prose
+    // and this JSON line — emitInstallCompleted does not add leading whitespace.
+    process.stdout.write(JSON.stringify(payload) + '\n');
+  } catch (err) {
+    try {
+      process.stdout.write(
+        JSON.stringify({
+          mysecond_status_protocol_version: PROTOCOL_VERSION,
+          at: new Date().toISOString(),
+          kind: 'status_emit_failed',
+          attempted_kind: event.kind,
+          reason: err instanceof Error ? err.message : 'serialize_error',
+        }) + '\n'
+      );
+    } catch {
+      // truly best-effort
+    }
+  }
+}

@@ -12,7 +12,7 @@
 import { installCompleteClaudeMessage, successBox } from '../copy.js';
 import { countPluginContents } from '../plugin-counts.js';
 import { pluginExtractDir } from '../mysecond-paths.js';
-import { emitStatus } from '../silent-status.js';
+import { emitInstallCompleted } from '../silent-status.js';
 
 import type { StepFn } from './types.js';
 
@@ -35,10 +35,15 @@ export const step13: StepFn = async ({ ctx, shared }) => {
     process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts) + '\n\n');
   }
 
-  // Emit install_completed JSON status event (Item 5B). shared.userEmail is
-  // populated by step-15 from /whoami; falls back to "you" if /whoami had a
-  // network error or didn't return an email field.
-  emitStatus({
+  // Emit install_completed JSON status event (Item 5B). Calls
+  // emitInstallCompleted (not emitStatus) so this event always reaches stdout
+  // regardless of --silent mode — it is the deterministic "done" signal the
+  // Claude Code Desktop chat assistant needs to stop its watcher loop.
+  // The blank line between the success box and this JSON is written inside
+  // emitInstallCompleted itself.
+  // shared.userEmail is populated by step-15 from /whoami; falls back to
+  // "you" if /whoami had a network error or didn't return an email field.
+  emitInstallCompleted({
     kind: 'install_completed',
     message: installCompleteClaudeMessage(shared.userEmail ?? 'you'),
     skills_installed: shared.pluginCounts?.skills ?? 0,

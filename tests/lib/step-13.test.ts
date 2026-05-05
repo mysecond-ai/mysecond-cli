@@ -106,7 +106,7 @@ describe('step-13: install_completed JSON status event', () => {
     expect(completed.message).toContain('Connected as: you');
   });
 
-  it('does not emit JSON to stdout when not in silent mode', async () => {
+  it('emits install_completed to stdout even in non-silent (interactive) mode', async () => {
     setSilentMode(false);
     const sctx = makeContext({
       silent: false,
@@ -116,12 +116,26 @@ describe('step-13: install_completed JSON status event', () => {
     });
     await step13(sctx);
 
-    // Non-silent: no JSON events emitted (silent-status no-ops).
-    const jsonLines = stdoutWrites.filter((s) => s.startsWith('{'));
-    expect(jsonLines).toHaveLength(0);
-    // The framed success box still prints though.
-    const allWrites = stdoutWrites.join('');
-    expect(allWrites).toContain('mySecond PM OS installed');
+    // install_completed must appear in stdout regardless of silentMode —
+    // it is the deterministic done-signal for the chat assistant.
+    const allOutput = stdoutWrites.join('');
+    const jsonLines = stdoutWrites.filter((s) => s.trim().startsWith('{'));
+    const events = jsonLines.map((line) => JSON.parse(line.trim()));
+    const completed = events.find(
+      (e: { kind?: string }) => e.kind === 'install_completed',
+    );
+    expect(completed).toBeTruthy();
+    expect(completed.mysecond_status_protocol_version).toBe(1);
+
+    // install_started must NOT appear in interactive mode (emitStatus is still
+    // silent-only — only install_completed bypasses the gate).
+    const started = events.find(
+      (e: { kind?: string }) => e.kind === 'install_started',
+    );
+    expect(started).toBeUndefined();
+
+    // The framed success box still prints in interactive mode.
+    expect(allOutput).toContain('mySecond PM OS installed');
   });
 
   it('still completes the step (returns kind: completed) regardless of email', async () => {
