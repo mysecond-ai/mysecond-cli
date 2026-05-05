@@ -43,6 +43,7 @@ import {
 } from '../mysecond-paths.js';
 import { fetchAndExtractPlugin } from '../plugin-tarball.js';
 import { probeLayerOne } from '../plugin-load-detect.js';
+import { emitStatus } from '../silent-status.js';
 import { writeSyncState } from '../sync-state.js';
 
 import type { StepFn } from './types.js';
@@ -89,6 +90,10 @@ async function doStep9(
   shared: import('./types.js').StepContext['shared'],
   slug: string
 ): Promise<import('./types.js').StepResult> {
+  // Fix C Step 1: measure step-9 total wall-clock so we can see how much of
+  // the install time is actually consumed here. Emitted as step_9_total_timed
+  // at step end (silent mode) and logged to stderr (interactive mode).
+  const step9StartMs = performance.now();
   // Sub-step (a): fetch signed URL.
   let meta;
   try {
@@ -289,13 +294,41 @@ async function doStep9(
   // — other plugins may legitimately error out (corrupt sub-plugin, partial
   // marketplace) without breaking the customer's core sync flow.
   const failedPlugins: string[] = [];
-  for (const plugin of plugins) {
+  for (let pluginIdx = 0; pluginIdx < plugins.length; pluginIdx++) {
+    // plugins[] is bounded by the loop condition; the non-null assertion is safe.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const plugin = plugins[pluginIdx]!;
     const spec = pluginInstallSpec(slug, plugin.name);
+    // Fix C Step 1: per-plugin wall-clock measurement. We want to see
+    // which plugin(s) are slow before deciding whether to parallelize.
+    const pluginStartMs = performance.now();
     const installResult = spawnSync(
       'claude',
       ['plugin', 'install', spec, '--scope', 'user'],
       { stdio: ctx.silent ? 'pipe' : 'inherit' }
     );
+    const pluginDurationMs = Math.round(performance.now() - pluginStartMs);
+
+    // Fix C Step 1: emit per-plugin timing in silent mode.
+    emitStatus({
+      kind: 'plugin_install_timed',
+      plugin: plugin.name,
+      duration_ms: pluginDurationMs,
+      exit_code: installResult.status ?? -1,
+      plugin_index: pluginIdx,
+      plugin_total: plugins.length,
+    });
+
+    // Fix C Step 1: write progress to stderr in interactive mode so a
+    // terminal user can see real-time progress without contaminating the
+    // JSON event stream on stdout.
+    if (!ctx.silent) {
+      const durationSec = Math.round(pluginDurationMs / 1000);
+      process.stderr.write(
+        `[mysecond] Installed ${plugin.name} in ${durationSec}s (${pluginIdx + 1}/${plugins.length})\n`
+      );
+    }
+
     // ENOENT on the binary is fatal regardless of which plugin in the loop
     // hit it — PATH issue affects every plugin install.
     if (installResult.error !== undefined && (installResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -351,6 +384,24 @@ async function doStep9(
   // Reset auth-thrash counter on success (CTO-v1.3-B3 critical).
   state.step9Auth401RetryCount = 0;
   writeSyncState(ctx.rootDir, state);
+
+  // Fix C Step 1: emit step-level total timing. Includes everything from
+  // signed-URL fetch through plugin probe — the full wall-clock the customer
+  // is waiting for. Emitted in silent mode as step_9_total_timed JSON event.
+  const step9DurationMs = Math.round(performance.now() - step9StartMs);
+  emitStatus({
+    kind: 'step_9_total_timed',
+    duration_ms: step9DurationMs,
+    plugin_count: plugins.length,
+    failed_count: failedPlugins.length,
+  });
+  // Also write to stderr in interactive mode so the terminal user can see
+  // the total plugin-install phase time without grepping stdout JSON.
+  if (!ctx.silent) {
+    process.stderr.write(
+      `[mysecond] Plugin install phase complete: ${plugins.length} plugins in ${Math.round(step9DurationMs / 1000)}s (${failedPlugins.length} failed)\n`
+    );
+  }
 
   return { step: 9, outcome: { kind: 'completed' } };
 }

@@ -26,10 +26,14 @@ const PROTOCOL_VERSION = 1;
 export type StatusKind =
   | 'install_started'
   | 'device_code_minted'
+  | 'device_code_minted_timed'   // Fix C Step 1: device-code request wall-clock
   | 'awaiting_authorization'
   | 'device_authorized'
+  | 'device_authorized_timed'    // Fix C Step 1: token-poll wall-clock
   | 'keychain_write_failed' // CAIO Day 4: discriminable from generic install_failed
   | 'install_step_completed'
+  | 'plugin_install_timed'       // Fix C Step 1: per-plugin install wall-clock
+  | 'step_9_total_timed'         // Fix C Step 1: full step-9 wall-clock + summary
   | 'install_completed'
   | 'install_failed'
   | 'timeout'

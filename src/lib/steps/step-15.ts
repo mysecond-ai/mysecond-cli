@@ -160,6 +160,10 @@ async function runDeviceCodeFlow(
     installId,
   };
 
+  // Fix C Step 1: measure device-code mint wall-clock. The requestDeviceCode
+  // call does a single POST to /api/companion/device/code. If this is slow,
+  // the bottleneck is network latency to our API, not the token-poll loop.
+  const mintStartMs = performance.now();
   let codeResp;
   try {
     codeResp = await requestDeviceCode(codeOpts);
@@ -172,6 +176,13 @@ async function runDeviceCodeFlow(
     }
     throw err;
   }
+  const mintDurationMs = Math.round(performance.now() - mintStartMs);
+  // Emit in silent mode only — in interactive mode the stderr device-code
+  // block (written immediately below) is the customer-facing surface.
+  emitStatus({
+    kind: 'device_code_minted_timed',
+    duration_ms: mintDurationMs,
+  });
 
   // CAIO #10: print URL to stdout BEFORE the open attempt. The chat is the
   // deterministic surface; auto-open is best-effort.
@@ -213,6 +224,11 @@ async function runDeviceCodeFlow(
   });
 
   // Poll until authorized or 540s cap.
+  // Fix C Step 1: measure the token-poll loop wall-clock. This is the
+  // time between the user receiving the code and clicking "Authorize" in
+  // the browser — dominated by human speed, not CLI overhead. Useful to
+  // distinguish "device-code flow is slow" from "user was slow to click".
+  const pollStartMs = performance.now();
   let tokenResp;
   try {
     tokenResp = await pollForToken({
@@ -229,6 +245,14 @@ async function runDeviceCodeFlow(
     }
     throw err;
   }
+  const pollDurationMs = Math.round(performance.now() - pollStartMs);
+  // Emit timing for the poll phase regardless of silent/interactive mode —
+  // same pattern as device_code_minted_timed above. isSilentMode() check is
+  // handled inside emitStatus; we always call it so both code paths are covered.
+  emitStatus({
+    kind: 'device_authorized_timed',
+    duration_ms: pollDurationMs,
+  });
 
   // Persist the token (keychain on macOS, file fallback elsewhere).
   const setResult = setDeviceToken(ctx.rootDir, tokenResp.access_token);
