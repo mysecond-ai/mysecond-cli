@@ -77,7 +77,7 @@ describe('mysecond-paths (Decision 0-C cross-platform path handling)', () => {
   });
 
   it('installedPluginManifestPath defaults to sentinel plugin when name omitted', () => {
-    // Default arg = SENTINEL_PLUGIN_NAME = pm-companion-sync.
+    // Default arg = SENTINEL_PLUGIN_NAME = pm-os (single-plugin era).
     expect(installedPluginManifestPath('acme', '1.0.0')).toBe(
       join(
         homedir(),
@@ -85,7 +85,7 @@ describe('mysecond-paths (Decision 0-C cross-platform path handling)', () => {
         'plugins',
         'cache',
         'mysecond-customer-acme',
-        'pm-companion-sync',
+        'pm-os',
         '1.0.0',
         '.claude-plugin',
         'plugin.json'

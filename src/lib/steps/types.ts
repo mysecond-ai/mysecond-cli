@@ -31,7 +31,7 @@ export interface StepContext {
     pluginSha256?: string;
     // Workstream B Day 5+: sub-plugin install loop (multi-plugin PMO
     // marketplace) tracks any non-sentinel plugins whose `claude plugin
-    // install` exited non-zero. Sentinel (pm-companion-sync) failure is
+    // install` exited non-zero. Sentinel (pm-os) failure is
     // hard-fail; non-sentinel failures degrade gracefully and surface here
     // for step-13 to acknowledge in the success box.
     failedPlugins?: string[];

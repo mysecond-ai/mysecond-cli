@@ -198,16 +198,21 @@ async function runDeviceCodeFlow(
   // The trailing \n explicitly flushes the pipe.
   // "Waiting for authorization..." stays on stdout — lower urgency, fine
   // to buffer.
+  // Day 5+ CLI-4: render the verification URL as a Markdown bare link
+  // ([url](url)) on its own line. This format survives Claude Code Desktop
+  // chat summarization where bare URLs in code blocks otherwise get
+  // collapsed/dropped. CISO decision (mysecond-app
+  // src/app/api/companion/device/code/route.ts:95-103): user_code MUST NOT
+  // be embedded in the URL — code is transferred manually by the customer.
   if (!ctx.silent) {
     process.stderr.write(
       [
         '',
-        'mySecond needs to authorize this device in your browser.',
+        'Authorize this device:',
         '',
-        `  Code:  ${codeResp.user_code}    ← copy this`,
-        `  Open:  ${codeResp.verification_uri_complete}`,
+        `    [${codeResp.verification_uri}](${codeResp.verification_uri})`,
         '',
-        'Type the code in the browser, then click Authorize.',
+        `Code: ${codeResp.user_code} (type into the page)`,
         '',
       ].join('\n') + '\n'
     );
