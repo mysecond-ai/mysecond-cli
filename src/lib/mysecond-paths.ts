@@ -1,6 +1,7 @@
 // `~/.mysecond/...` path helpers — the mySecond-managed dir per Decision 0-C.
 // Cross-platform via `os.homedir()` + `path.join()` (guardrail #4 — never `/` or `~`).
 
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -68,32 +69,114 @@ export function marketplaceName(slug: string): string {
   return `mysecond-customer-${slug}`;
 }
 
-// Plugin install spec for `claude plugin install` per §6.2 step 9 sub-step (f).
-// Format: `pm-os@<marketplace-name>` per Claude Code docs.
-export function pluginInstallSpec(slug: string): string {
-  return `pm-os@${marketplaceName(slug)}`;
+/**
+ * Sentinel plugin name used by post-install Layer 1 probe.
+ * `pm-companion-sync` carries the SessionStart + PostToolUse hooks that
+ * sync customer artifacts into Companion — if it didn't land in the cache,
+ * the install is functionally broken even if other plugins look fine.
+ */
+export const SENTINEL_PLUGIN_NAME = 'pm-companion-sync';
+
+/** Single plugin entry in a marketplace.json `plugins[]` array. */
+export interface PluginEntry {
+  name: string;
+  source: string;
 }
 
-// Empirically captured 2026-04-22 23:45 UTC (DV-2):
-// `~/.claude/plugins/cache/<marketplace-name>/<plugin-name>/<version>/.claude-plugin/plugin.json`.
-export function installedPluginManifestPath(slug: string, version: string): string {
+/**
+ * Read PMO's tarball-internal `.claude-plugin/marketplace.json` and return
+ * the `plugins[]` array, transformed so each `source` is relative to the
+ * cli's outer marketplace dir layout.
+ *
+ * Background: PMO's tarball ships its own marketplace.json at
+ * `<extractDir>/.claude-plugin/marketplace.json` declaring N sub-plugins
+ * with sources like `./companion-sync` (relative to PMO root). The cli
+ * extracts the tarball into `<marketplaceDir>/plugin/`, so an entry like
+ * `{name: 'pm-companion-sync', source: './companion-sync'}` must be
+ * rewritten to `{name: 'pm-companion-sync', source: './plugin/companion-sync'}`
+ * so Claude Code can resolve it from the customer-marketplace's outer dir.
+ *
+ * Called from step-9 BEFORE atomic-rename of the tmp extract dir, so it
+ * always reads PMO's source-of-truth — never the cli-generated overwrite.
+ *
+ * Throws if the manifest is missing or malformed: PMO repo invariant
+ * guarantees it's always present in published tarballs (§6.7b spec).
+ */
+export function listMarketplacePluginsFromExtractDir(
+  extractDir: string
+): PluginEntry[] {
+  const manifestPath = join(extractDir, '.claude-plugin', 'marketplace.json');
+  const raw = readFileSync(manifestPath, 'utf-8');
+  const parsed = JSON.parse(raw) as {
+    plugins?: Array<{ name?: unknown; source?: unknown }>;
+  };
+  if (!Array.isArray(parsed.plugins) || parsed.plugins.length === 0) {
+    throw new Error(
+      `PMO tarball marketplace.json at ${manifestPath} has no plugins[] array. ` +
+        `This indicates a malformed tarball — contact support@mysecond.ai.`
+    );
+  }
+  return parsed.plugins
+    .filter(
+      (p): p is { name: string; source: string } =>
+        typeof p?.name === 'string' && typeof p?.source === 'string',
+    )
+    .map((p) => ({
+      name: p.name,
+      // PMO's source like "./companion-sync" or "companion-sync" → cli layout
+      // "./plugin/companion-sync". Strip leading "./" first to handle both forms.
+      source: `./plugin/${p.source.replace(/^\.\//, '')}`,
+    }));
+}
+
+/**
+ * Plugin install spec for `claude plugin install` per §6.2 step 9 sub-step (f).
+ * Format: `<plugin-name>@<marketplace-name>` per Claude Code docs.
+ *
+ * Workstream B Day 5+: was hardcoded `pm-os@...` — now takes plugin name
+ * to support multi-plugin marketplace install (PMO restructured 2026-04-XX).
+ * Legacy callers expecting single-plugin behavior pass SENTINEL_PLUGIN_NAME.
+ */
+export function pluginInstallSpec(slug: string, pluginName: string): string {
+  return `${pluginName}@${marketplaceName(slug)}`;
+}
+
+/**
+ * Empirically captured 2026-04-22 23:45 UTC (DV-2):
+ * `~/.claude/plugins/cache/<marketplace-name>/<plugin-name>/<version>/.claude-plugin/plugin.json`.
+ *
+ * Workstream B Day 5+: parameterized on pluginName (was hardcoded `pm-os`)
+ * for multi-plugin install probe.
+ */
+export function installedPluginManifestPath(
+  slug: string,
+  version: string,
+  pluginName: string = SENTINEL_PLUGIN_NAME
+): string {
   return join(
     homedir(),
     '.claude',
     'plugins',
     'cache',
     marketplaceName(slug),
-    'pm-os',
+    pluginName,
     version,
     '.claude-plugin',
     'plugin.json'
   );
 }
 
-// Same as above with wildcard version — used when caller doesn't know the exact
-// version (Layer 1 probe in §7.2). Returns the parent dir to glob.
-export function installedPluginCacheParent(slug: string): string {
-  return join(homedir(), '.claude', 'plugins', 'cache', marketplaceName(slug), 'pm-os');
+/**
+ * Same as above with wildcard version — used when caller doesn't know the exact
+ * version (Layer 1 probe in §7.2). Returns the parent dir to glob.
+ *
+ * Workstream B Day 5+: parameterized on pluginName (was hardcoded `pm-os`).
+ */
+export function installedPluginCacheParent(
+  slug: string,
+  pluginName: string = SENTINEL_PLUGIN_NAME
+): string {
+  return join(homedir(), '.claude', 'plugins', 'cache', marketplaceName(slug), pluginName);
 }
 
 // Slug-format guard (RED-TEAM P0-2). The slug arrives from server responses

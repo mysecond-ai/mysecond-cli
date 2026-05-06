@@ -17,6 +17,13 @@ export interface CommandContext {
   forceUpdate: boolean;
   fix: boolean;
   strategy: ConflictStrategy;
+  /**
+   * `mysecond init --resume` (Workstream B Phase 2a). When set, init re-runs
+   * the device-code OAuth step even if its ledger entry is marked complete,
+   * picking up an interrupted authorization. Other completed steps are still
+   * skipped; only the device-code step's idempotency is overridden.
+   */
+  resume: boolean;
 }
 
 export interface ParsedFlags {
@@ -26,6 +33,7 @@ export interface ParsedFlags {
   dryRun: boolean;
   forceUpdate: boolean;
   fix: boolean;
+  resume: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -40,6 +48,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     dryRun: false,
     forceUpdate: false,
     fix: false,
+    resume: false,
     strategy: null,
     positional: [],
   };
@@ -54,6 +63,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.forceUpdate = true;
     } else if (arg === '--fix') {
       out.fix = true;
+    } else if (arg === '--resume') {
+      out.resume = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -108,7 +119,27 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   loadDotenv(rootDir);
 
   const apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
-  const apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
+
+  // Codex P0-1: load device token from keychain at context-build time.
+  // The previous design read the token in step 15, but the runner skips
+  // completed steps on re-run — so once step 15 was marked done, ctx.apiKey
+  // would be empty on subsequent inits and step 4 (/install-ready) would
+  // 401. Sourcing here makes idempotent re-runs work correctly:
+  //   precedence: --api-key flag > COMPANION_API_KEY env > keychain/file
+  let apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
+  if (apiKey.length === 0) {
+    try {
+      // Lazy import to keep `mysecond --version` and `mysecond --help` fast
+      // (they don't need credentials).
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { getDeviceToken } = require('./keychain.js') as typeof import('./keychain.js');
+      const fromStorage = getDeviceToken(rootDir);
+      if (fromStorage !== null) apiKey = fromStorage.token;
+    } catch {
+      // Best-effort. If keychain lookup throws, fall through to empty
+      // apiKey; step 15 will run the device-code flow.
+    }
+  }
 
   // Strategy default: prompt if interactive (TTY) and not silent; cloud-wins otherwise.
   // CXO call (PR 4b design): keep customer in control where possible, default to safe
@@ -124,6 +155,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     dryRun: flags.dryRun,
     forceUpdate: flags.forceUpdate,
     fix: flags.fix,
+    resume: flags.resume,
     strategy,
   };
 }
