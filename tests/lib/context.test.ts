@@ -44,6 +44,25 @@ describe('parseGlobalFlags', () => {
     const f = parseGlobalFlags(['arg1', '--silent', 'arg2']);
     expect(f.positional).toEqual(['arg1', 'arg2']);
   });
+
+  // v1.4.2: two-command auth flow flags.
+  it('parses --auth-only flag', () => {
+    const f = parseGlobalFlags(['--auth-only']);
+    expect(f.authOnly).toBe(true);
+    expect(f.resume).toBe(false);
+  });
+
+  it('parses --resume flag', () => {
+    const f = parseGlobalFlags(['--resume']);
+    expect(f.resume).toBe(true);
+    expect(f.authOnly).toBe(false);
+  });
+
+  it('defaults authOnly + resume to false', () => {
+    const f = parseGlobalFlags([]);
+    expect(f.authOnly).toBe(false);
+    expect(f.resume).toBe(false);
+  });
 });
 
 describe('buildContext', () => {

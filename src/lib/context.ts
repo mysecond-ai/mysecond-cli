@@ -24,6 +24,15 @@ export interface CommandContext {
    * skipped; only the device-code step's idempotency is overridden.
    */
   resume: boolean;
+  /**
+   * `mysecond init --auth-only` (v1.4.2). Mints a device code, persists
+   * pending-auth state, and exits ~5s. Pairs with a follow-up
+   * `mysecond init --resume` to finish install. Two-command flow exists
+   * because Claude Code Desktop's bash tool buffers single-command stdout
+   * until completion, so a 9-minute single-command flow never surfaces
+   * the auth code to the agent.
+   */
+  authOnly: boolean;
 }
 
 export interface ParsedFlags {
@@ -34,6 +43,7 @@ export interface ParsedFlags {
   forceUpdate: boolean;
   fix: boolean;
   resume: boolean;
+  authOnly: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -49,6 +59,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     forceUpdate: false,
     fix: false,
     resume: false,
+    authOnly: false,
     strategy: null,
     positional: [],
   };
@@ -65,6 +76,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.fix = true;
     } else if (arg === '--resume') {
       out.resume = true;
+    } else if (arg === '--auth-only') {
+      out.authOnly = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -156,6 +169,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     forceUpdate: flags.forceUpdate,
     fix: flags.fix,
     resume: flags.resume,
+    authOnly: flags.authOnly,
     strategy,
   };
 }
