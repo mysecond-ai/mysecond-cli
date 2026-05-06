@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { projectHash } from './project-hash.js';
+
 const MYSECOND_HOME_DIRNAME = '.mysecond';
 
 export function mysecondHome(): string {
@@ -42,6 +44,19 @@ export function pluginExtractDir(slug: string): string {
 
 export function pluginTmpExtractDir(slug: string, pid: number = process.pid): string {
   return join(marketplaceTmpDir(slug, pid), 'plugin');
+}
+
+// Pending-auth state for the two-command flow (v1.4.2).
+// `mysecond init --auth-only` mints a device code, persists pending-auth state
+// here, and exits ~5s. `mysecond init --resume` reads this file, polls for the
+// token, then runs the rest of install.
+// Path: `~/.mysecond/projects/<projectHash>/pending-auth.json` (mode 0600).
+export function pendingAuthDir(absoluteProjectDir: string): string {
+  return join(mysecondHome(), 'projects', projectHash(absoluteProjectDir));
+}
+
+export function pendingAuthPath(absoluteProjectDir: string): string {
+  return join(pendingAuthDir(absoluteProjectDir), 'pending-auth.json');
 }
 
 // Last-known-good cache root: `~/.mysecond/cache/last-known-good/`

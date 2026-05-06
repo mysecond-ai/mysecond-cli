@@ -65,7 +65,8 @@ function printHelp(): void {
     '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
     '  --force-update         Bypass the 24-hour npm-update timebox in sync',
     '  --fix                  Resolve init conflicts interactively (`mysecond init` only)',
-    '  --resume               Re-run device-code OAuth on a partial install (`mysecond init` only)',
+    '  --auth-only            Mint device code, persist state, exit (`mysecond init` only). Pairs with --resume.',
+    '  --resume               Resume install from persisted auth state OR re-run device-code OAuth (`mysecond init` only)',
     '',
     'Docs: https://mysecond.ai',
   ];

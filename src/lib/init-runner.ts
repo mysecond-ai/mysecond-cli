@@ -79,7 +79,26 @@ export async function runInit(ctx: CommandContext): Promise<number> {
 
   try {
     for (const entry of STEPS) {
-      if (isStepComplete(state, entry.number)) {
+      // v1.4.2 two-command auth flow: in --auth-only mode, run step 15
+      // (device-code mint) only and exit. Subsequent steps wait for
+      // `mysecond init --resume` to complete the install.
+      if (ctx.authOnly && entry.number !== 15) {
+        if (!ctx.silent && entry.number === 1) {
+          // Print this once, after step 15 has run.
+          process.stdout.write(
+            '\n(auth-only mode: install will continue when you run --resume)\n'
+          );
+        }
+        break;
+      }
+
+      // --resume forces step 15 (device-code OAuth) to re-run regardless of
+      // ledger state. v1.4.2: this is the only way the two-command flow's
+      // poll-only path executes when the customer has a partial install with
+      // step 15 already marked (e.g., legacy --resume callers, or a re-run
+      // after a token revocation).
+      const resumeForcesStep15 = ctx.resume && entry.number === 15;
+      if (isStepComplete(state, entry.number) && !resumeForcesStep15) {
         if (!ctx.silent) {
           process.stdout.write(`step ${entry.number}/${STEPS.length}: ${entry.description} — already done, skipping\n`);
         }
@@ -132,7 +151,13 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       // (Node version check, install-ready poll, plugin-load probe) but never
       // advances the ledger so the synthetic doesn't pollute the customer's
       // (or staging's) state.
-      if (!ctx.dryRun) {
+      //
+      // v1.4.2: in --auth-only mode, do NOT mark step 15 complete. The auth
+      // hasn't actually completed — only the code was minted. --resume needs
+      // step 15 to run again (in poll-only mode) to exchange the code for a
+      // token. If we marked it complete here, --resume would skip step 15
+      // entirely and try to run downstream steps with an empty apiKey.
+      if (!ctx.dryRun && !(ctx.authOnly && entry.number === 15)) {
         markStepComplete(ctx.rootDir, state, entry.number);
       }
     }

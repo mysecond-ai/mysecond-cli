@@ -23,6 +23,17 @@
 //     ledger but failing API calls.
 //   - Without --resume + ctx.apiKey empty: run full device-code flow.
 //
+// v1.4.2 — two-command auth flow:
+//   - --auth-only: mint code, print ALL-CAPS banner + structured marker,
+//     persist pending-auth state, return early. Runner exits after this
+//     step (no further steps run).
+//   - --resume + pending-auth state present: skip the mint, poll using the
+//     persisted device_code, then continue with the rest of install. On
+//     expiry of pending state: clear it and surface a clear "re-run with
+//     --auth-only" message.
+//   - Default flow (no flags): mint + poll inline, but print the new
+//     ALL-CAPS banner before polling so SOME agents may surface it.
+//
 // Codex review fixes baked in: P0-1 (keychain read moved to buildContext),
 // P0-2 (whoami validation before trust), P0-4 (revoke on --resume).
 //
@@ -33,10 +44,19 @@ import {
   requestDeviceCode,
   getOrCreateInstallId,
   DeviceCodeError,
+  type DeviceCodeResponse,
 } from '../device-code.js';
 import { clearDeviceToken, setDeviceToken } from '../keychain.js';
 import { MysecondError } from '../errors.js';
 import { emitStatus } from '../silent-status.js';
+import {
+  clearPendingAuth,
+  isPendingAuthExpired,
+  pendingAuthSecondsRemaining,
+  readPendingAuth,
+  writePendingAuth,
+  type PendingAuthState,
+} from '../pending-auth.js';
 
 import type { CommandContext } from '../context.js';
 import type { StepFn } from './types.js';
@@ -46,18 +66,35 @@ declare const __VERSION__: string;
 const WHOAMI_TIMEOUT_MS = 10_000;
 
 export const step15: StepFn = async ({ ctx, shared }) => {
-  // ── --resume: revoke first, then proceed to full flow ─────────────────
+  // ── --auth-only: mint, persist, exit ─────────────────────────────────
+  // The runner detects ctx.authOnly and short-circuits the rest of the
+  // pipeline after this step returns.
+  if (ctx.authOnly) {
+    return runAuthOnlyMint(ctx);
+  }
+
+  // ── --resume with pending-auth state: skip mint, poll only ──────────
+  // The fast path for the two-command flow: customer ran --auth-only,
+  // authorized in the browser, now runs --resume to finish install.
   if (ctx.resume) {
+    const pending = readPendingAuth(ctx.rootDir);
+    if (pending !== null) {
+      if (isPendingAuthExpired(pending)) {
+        clearPendingAuth(ctx.rootDir);
+        throw new MysecondError(
+          1,
+          'Device code expired. Re-run with --auth-only to mint a fresh code.'
+        );
+      }
+      return runPollOnly(ctx, shared, pending);
+    }
+
+    // --resume with NO pending state. Treat as the legacy resume (revoke +
+    // full mint+poll inline) — preserves v1.4.0/1.4.1 behavior for callers
+    // upgrading without re-running --auth-only.
     if (ctx.apiKey.length > 0) {
       await tryRevokeExistingToken(ctx);
-      // Codex pass 2 P1-3: clear the local cached token IMMEDIATELY after
-      // revoke. Without this, a cli crash between revoke and new-token
-      // mint would leave the keychain holding a now-revoked token. On
-      // recovery (without --resume), getDeviceToken would return that
-      // stale token, /whoami would 401, and the customer would see a
-      // confusing "credential rejected" message before re-auth fires.
       clearDeviceToken(ctx.rootDir);
-      // Clear in-memory key so the post-revoke flow doesn't try to reuse it.
       (ctx as { apiKey: string }).apiKey = '';
     }
     return runDeviceCodeFlow(ctx, shared);
@@ -147,7 +184,200 @@ async function tryRevokeExistingToken(ctx: CommandContext): Promise<void> {
   }
 }
 
-// ── Full device-code flow ─────────────────────────────────────────────────
+// ── Visual output: ALL-CAPS banner + structured marker ────────────────────
+
+function printAuthBanner(
+  codeResp: { user_code: string; verification_uri: string; expires_in: number }
+): void {
+  // Both formats per CAIO recommendation. ALL-CAPS banner survives LLM
+  // chat summarization; structured marker enables agent regex parsing.
+  // Written to stderr — Node block-buffers stdout when piped (Claude Code
+  // Desktop's bash tool is a pipe), so a multi-line stdout.write can sit
+  // in the buffer for 30s-2min; stderr flushes immediately.
+  const expiresMins = Math.max(1, Math.round(codeResp.expires_in / 60));
+  const lines = [
+    '',
+    '============================================================',
+    '  AUTHORIZATION REQUIRED',
+    '',
+    `  Code:    ${codeResp.user_code}`,
+    `  URL:     ${codeResp.verification_uri}`,
+    `  Expires: ${expiresMins} minutes`,
+    '============================================================',
+    '',
+    `[mysecond:auth-required] code=${codeResp.user_code} url=${codeResp.verification_uri} expires_in=${codeResp.expires_in}`,
+    '',
+    'Authorize at the URL above, paste the code, click Authorize.',
+    '',
+  ];
+  process.stderr.write(lines.join('\n') + '\n');
+}
+
+function printResumeHint(slug: string): void {
+  process.stderr.write(
+    [
+      'Then run this command to finish installation:',
+      `  MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@latest init --resume`,
+      '',
+    ].join('\n') + '\n'
+  );
+}
+
+// ── --auth-only: mint + persist + exit ────────────────────────────────────
+
+async function runAuthOnlyMint(
+  ctx: CommandContext,
+): Promise<{ step: number; outcome: { kind: 'completed' }; message?: string }> {
+  const installId = getOrCreateInstallId();
+  const codeOpts = {
+    apiBase: ctx.apiBase,
+    cliVersion: __VERSION__,
+    installId,
+  };
+
+  let codeResp: DeviceCodeResponse;
+  try {
+    codeResp = await requestDeviceCode(codeOpts);
+  } catch (err) {
+    if (err instanceof DeviceCodeError) {
+      throw new MysecondError(
+        1,
+        `Couldn't request a device code (${err.code}): ${err.message}`
+      );
+    }
+    throw err;
+  }
+
+  const slug = process.env.MYSECOND_CUSTOMER_SLUG ?? 'unknown';
+  const mintedAt = new Date();
+  const expiresAt = new Date(mintedAt.getTime() + codeResp.expires_in * 1000);
+
+  const state: PendingAuthState = {
+    device_code: codeResp.device_code,
+    user_code: codeResp.user_code,
+    verification_uri: codeResp.verification_uri,
+    expires_at: expiresAt.toISOString(),
+    interval_seconds: codeResp.interval,
+    slug,
+    minted_at: mintedAt.toISOString(),
+  };
+  writePendingAuth(ctx.rootDir, state);
+
+  if (!ctx.silent) {
+    printAuthBanner(codeResp);
+    printResumeHint(slug);
+  }
+
+  emitStatus({
+    kind: 'device_code_minted',
+    user_code: codeResp.user_code,
+    verification_uri: codeResp.verification_uri,
+    expires_in: codeResp.expires_in,
+  });
+
+  return {
+    step: 15,
+    outcome: { kind: 'completed' },
+    message: ctx.silent ? undefined : 'step 15: device code minted (auth-only mode)',
+  };
+}
+
+// ── --resume from pending-auth state: poll only ───────────────────────────
+
+async function runPollOnly(
+  ctx: CommandContext,
+  shared: import('./types.js').StepContext['shared'],
+  pending: PendingAuthState,
+): Promise<{ step: number; outcome: { kind: 'completed' }; message?: string }> {
+  const installId = getOrCreateInstallId();
+  const codeOpts = {
+    apiBase: ctx.apiBase,
+    cliVersion: __VERSION__,
+    installId,
+  };
+
+  if (!ctx.silent) {
+    process.stderr.write(
+      [
+        '',
+        `Resuming install. Code: ${pending.user_code} (${pendingAuthSecondsRemaining(pending)}s remaining).`,
+        'Waiting for authorization...',
+        '',
+      ].join('\n') + '\n'
+    );
+  }
+
+  let tokenResp;
+  try {
+    tokenResp = await pollForToken({
+      ...codeOpts,
+      deviceCode: pending.device_code,
+      intervalSeconds: pending.interval_seconds,
+    });
+  } catch (err) {
+    if (err instanceof DeviceCodeError) {
+      // On expired/invalid/already_exchanged, clear the stale state so the
+      // customer's next --auth-only run starts clean.
+      if (
+        err.code === 'expired' ||
+        err.code === 'invalid' ||
+        err.code === 'already_exchanged'
+      ) {
+        clearPendingAuth(ctx.rootDir);
+      }
+      throw new MysecondError(
+        1,
+        `Device authorization failed (${err.code}): ${err.message}`
+      );
+    }
+    throw err;
+  }
+
+  // Persist the token (keychain on macOS, file fallback elsewhere).
+  const setResult = setDeviceToken(ctx.rootDir, tokenResp.access_token);
+
+  // Mutate ctx for downstream steps.
+  (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
+
+  // Successfully exchanged — clear pending state.
+  clearPendingAuth(ctx.rootDir);
+
+  // Best-effort whoami for step-13 email.
+  const whoami = await fetchWhoami(ctx);
+  if (whoami.email) {
+    shared.userEmail = whoami.email;
+  }
+
+  if (
+    setResult.fallbackReason === 'roundtrip_failed' ||
+    setResult.fallbackReason === 'write_failed'
+  ) {
+    emitStatus({
+      kind: 'keychain_write_failed',
+      reason: setResult.fallbackReason,
+    });
+  }
+
+  emitStatus({
+    kind: 'device_authorized',
+    token_storage: setResult.storage,
+    keychain_unavailable_reason: setResult.fallbackReason ?? null,
+  });
+
+  if (!ctx.silent) {
+    process.stdout.write(
+      '\n  ✓ Device authorized. Continuing install...\n\n'
+    );
+  }
+
+  return {
+    step: 15,
+    outcome: { kind: 'completed' },
+    message: ctx.silent ? undefined : 'step 15: device authorized (resumed)',
+  };
+}
+
+// ── Full device-code flow (legacy single-command path) ────────────────────
 
 async function runDeviceCodeFlow(
   ctx: CommandContext,
@@ -160,11 +390,9 @@ async function runDeviceCodeFlow(
     installId,
   };
 
-  // Fix C Step 1: measure device-code mint wall-clock. The requestDeviceCode
-  // call does a single POST to /api/companion/device/code. If this is slow,
-  // the bottleneck is network latency to our API, not the token-poll loop.
+  // Fix C Step 1: measure device-code mint wall-clock.
   const mintStartMs = performance.now();
-  let codeResp;
+  let codeResp: DeviceCodeResponse;
   try {
     codeResp = await requestDeviceCode(codeOpts);
   } catch (err) {
@@ -177,50 +405,19 @@ async function runDeviceCodeFlow(
     throw err;
   }
   const mintDurationMs = Math.round(performance.now() - mintStartMs);
-  // Emit in silent mode only — in interactive mode the stderr device-code
-  // block (written immediately below) is the customer-facing surface.
   emitStatus({
     kind: 'device_code_minted_timed',
     duration_ms: mintDurationMs,
   });
 
-  // CAIO #10: print URL to stdout BEFORE the open attempt. The chat is the
-  // deterministic surface; auto-open is best-effort.
-  // Day 5 pre-launch: user_code is NOT in the URL — customer types it
-  // into the page's input form. Print the code prominently with a copy-
-  // friendly hint so the customer knows where to find it.
-  //
-  // Day 5+ Item 5A (CAIO P0): write the device-code block to STDERR, not
-  // stdout. Node's process.stdout is block-buffered when piped (Claude Code
-  // Desktop's bash tool is a pipe), so a multi-line stdout.write can sit
-  // in the buffer for 30s-2min before the customer sees it. process.stderr
-  // is unbuffered by default when piped — the code surfaces in chat in ~5s.
-  // The trailing \n explicitly flushes the pipe.
-  // "Waiting for authorization..." stays on stdout — lower urgency, fine
-  // to buffer.
-  // Day 5+ CLI-4: render the verification URL as a Markdown bare link
-  // ([url](url)) on its own line. This format survives Claude Code Desktop
-  // chat summarization where bare URLs in code blocks otherwise get
-  // collapsed/dropped. CISO decision (mysecond-app
-  // src/app/api/companion/device/code/route.ts:95-103): user_code MUST NOT
-  // be embedded in the URL — code is transferred manually by the customer.
+  // v1.4.2: print the NEW ALL-CAPS banner BEFORE polling. Some agents may
+  // surface this even in single-command mode. The banner replaces the prior
+  // free-form Markdown link block — same information, deterministic shape.
   if (!ctx.silent) {
-    process.stderr.write(
-      [
-        '',
-        'Authorize this device:',
-        '',
-        `    [${codeResp.verification_uri}](${codeResp.verification_uri})`,
-        '',
-        `Code: ${codeResp.user_code} (type into the page)`,
-        '',
-      ].join('\n') + '\n'
-    );
+    printAuthBanner(codeResp);
     process.stdout.write('Waiting for authorization...\n');
   }
 
-  // Silent JSON status: cli emits "device_code_minted" so the chat client
-  // can render its own waiting UI without parsing prose stdout.
   emitStatus({
     kind: 'device_code_minted',
     user_code: codeResp.user_code,
@@ -229,10 +426,6 @@ async function runDeviceCodeFlow(
   });
 
   // Poll until authorized or 540s cap.
-  // Fix C Step 1: measure the token-poll loop wall-clock. This is the
-  // time between the user receiving the code and clicking "Authorize" in
-  // the browser — dominated by human speed, not CLI overhead. Useful to
-  // distinguish "device-code flow is slow" from "user was slow to click".
   const pollStartMs = performance.now();
   let tokenResp;
   try {
@@ -251,9 +444,6 @@ async function runDeviceCodeFlow(
     throw err;
   }
   const pollDurationMs = Math.round(performance.now() - pollStartMs);
-  // Emit timing for the poll phase regardless of silent/interactive mode —
-  // same pattern as device_code_minted_timed above. isSilentMode() check is
-  // handled inside emitStatus; we always call it so both code paths are covered.
   emitStatus({
     kind: 'device_authorized_timed',
     duration_ms: pollDurationMs,
@@ -265,20 +455,12 @@ async function runDeviceCodeFlow(
   // Mutate ctx for downstream steps.
   (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
 
-  // Item 5B: capture email from /whoami so step-13 can emit the
-  // install_completed JSON status event with installCompleteClaudeMessage(email).
-  // Best-effort — if /whoami fails here, step-13 falls back to a generic
-  // post-install message.
+  // Best-effort whoami for step-13 email.
   const whoami = await fetchWhoami(ctx);
   if (whoami.email) {
     shared.userEmail = whoami.email;
   }
 
-  // Emit a keychain_write_failed status when we fell back due to round-trip
-  // failure or write error (sandboxed-keychain edge case). Not a fatal
-  // condition — file fallback is a working credential — but worth a
-  // discriminable event so support can detect a sandboxed-keychain pattern
-  // in PostHog without grepping logs (CAIO Day 4).
   if (
     setResult.fallbackReason === 'roundtrip_failed' ||
     setResult.fallbackReason === 'write_failed'
@@ -295,9 +477,6 @@ async function runDeviceCodeFlow(
     keychain_unavailable_reason: setResult.fallbackReason ?? null,
   });
 
-  // CXO Day 4: parallel non-silent success line so the customer in their
-  // terminal sees an explicit "✓ authorized" instead of just "step 15:
-  // device authorized" (which doesn't tell them what to do next).
   if (!ctx.silent) {
     process.stdout.write(
       '\n  ✓ Device authorized. Quit and reopen Claude Code to load the mySecond plugin — your install will continue automatically.\n\n'
