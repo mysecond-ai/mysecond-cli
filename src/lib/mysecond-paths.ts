@@ -71,11 +71,14 @@ export function marketplaceName(slug: string): string {
 
 /**
  * Sentinel plugin name used by post-install Layer 1 probe.
- * `pm-companion-sync` carries the SessionStart + PostToolUse hooks that
- * sync customer artifacts into Companion — if it didn't land in the cache,
- * the install is functionally broken even if other plugins look fine.
+ * `pm-os` is the single plugin shipped today. The probe verifies its
+ * cache directory landed, but the install command's exit code is the
+ * authoritative signal — probe failures log informationally and do not
+ * abort install. (Historical: prior to single-plugin consolidation,
+ * the sentinel was `pm-companion-sync` to verify the SECOND plugin
+ * landed in a multi-plugin install.)
  */
-export const SENTINEL_PLUGIN_NAME = 'pm-companion-sync';
+export const SENTINEL_PLUGIN_NAME = 'pm-os';
 
 /** Single plugin entry in a marketplace.json `plugins[]` array. */
 export interface PluginEntry {

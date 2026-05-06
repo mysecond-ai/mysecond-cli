@@ -6,9 +6,9 @@
 // `~/.claude/plugins/cache/<marketplace-name>/<plugin-name>/<version>/.claude-plugin/plugin.json`.
 // `<version>` is wildcard-globbed when caller doesn't know the exact version.
 //
-// Workstream B Day 5+: parameterized on `pluginName` (was hardcoded `pm-os`).
-// PMO is now a multi-plugin marketplace; the launch-critical sentinel is
-// `pm-companion-sync` (carries the SessionStart + PostToolUse hooks).
+// Workstream B Day 5+: parameterized on `pluginName` (defaults to the sentinel).
+// The launch-critical sentinel plugin is `pm-os` (see SENTINEL_PLUGIN_NAME);
+// it carries the SessionStart + PostToolUse hooks.
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,9 +27,9 @@ export type LayerOneResult =
 // exact path; otherwise glob under the parent dir for any version subdir
 // containing `.claude-plugin/plugin.json`.
 //
-// `pluginName` defaults to the sentinel (pm-companion-sync) — verifying its
-// presence is the load-bearing health check because it owns the sync hooks.
-// Other plugins can be probed by passing their name explicitly.
+// `pluginName` defaults to the sentinel (`pm-os`) — verifying its presence is
+// the load-bearing health check because it owns the sync hooks. Other plugins
+// can be probed by passing their name explicitly.
 export function probeLayerOne(
   slug: string,
   version: string | null = null,

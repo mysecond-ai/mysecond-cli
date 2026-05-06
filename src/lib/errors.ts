@@ -48,7 +48,7 @@ export class MysecondError extends Error {
   static invalidApiKey(detail?: string): MysecondError {
     return new MysecondError(
       1,
-      `Invalid API key. Get a new one at https://mysecond.ai/activate/complete${detail ? ` (${detail})` : ''}.`,
+      `Invalid API key. Run \`mysecond init\` to re-authorize. If this persists, contact support@mysecond.ai${detail ? ` (${detail})` : ''}.`,
       { subCode: 'invalid_key' }
     );
   }

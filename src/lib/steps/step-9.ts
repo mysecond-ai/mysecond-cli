@@ -286,13 +286,11 @@ async function doStep9(
     );
   }
 
-  // Install loop over all sub-plugins from PMO's marketplace (Workstream B
-  // Day 5+). Previously single-shot `claude plugin install pm-os@<m>` which
-  // silently no-op'd against PMO's multi-plugin layout. Now iterates the
-  // plugins[] read from PMO's manifest above. Tracks failures; hard-fails
-  // ONLY if the launch-critical sentinel (`pm-companion-sync`) doesn't land
-  // — other plugins may legitimately error out (corrupt sub-plugin, partial
-  // marketplace) without breaking the customer's core sync flow.
+  // Install loop over all sub-plugins from PMO's marketplace. Today
+  // there's only one plugin (`pm-os`); the loop is preserved for the
+  // multi-plugin future. Tracks failures; hard-fails on the sentinel
+  // (`pm-os` itself) since that's the entire install — non-sentinel
+  // failures degrade gracefully.
   const failedPlugins: string[] = [];
   for (let pluginIdx = 0; pluginIdx < plugins.length; pluginIdx++) {
     // plugins[] is bounded by the loop condition; the non-null assertion is safe.
@@ -339,14 +337,14 @@ async function doStep9(
     }
     if (installResult.status !== 0) {
       failedPlugins.push(plugin.name);
-      // Sentinel failure = hard stop. Without pm-companion-sync, the
-      // customer's PostToolUse + SessionStart hooks never fire and
-      // artifacts never sync to Companion — that's the core value prop.
+      // Single-plugin era: `claude plugin install` exit code is the
+      // authoritative signal. A non-zero exit on the only plugin (`pm-os`)
+      // means the install genuinely failed — surface a clear error.
       if (plugin.name === SENTINEL_PLUGIN_NAME) {
         const exitDisplay = installResult.status ?? 'ENOENT';
         throw new MysecondError(
           6,
-          `claude plugin install ${spec} failed (exit ${exitDisplay}). This is the launch-critical sync plugin; without it, your context files won't sync to mysecond.ai. Re-run \`mysecond init\` or contact support@mysecond.ai.`
+          `claude plugin install ${spec} failed (exit ${exitDisplay}). Re-run \`mysecond init\` or contact support@mysecond.ai.`
         );
       }
       // Non-sentinel failure: warn and continue. Customer's success box at
@@ -364,17 +362,16 @@ async function doStep9(
     shared.failedPlugins = failedPlugins;
   }
 
-  // Post-install filesystem probe — verify the SENTINEL plugin landed where
-  // we expect (the launch-critical sync hooks). Other plugins are checked
-  // implicitly via the install-loop status codes above.
-  // Pass null for version so we match by plugin name only — Claude Code
-  // installs at its own version (e.g. 1.0.0 from plugin.json) which differs
-  // from the regen-timestamp version in meta. Any installed version passes.
+  // Post-install filesystem probe — informational only. The install
+  // command's exit code (checked above) is the authoritative success
+  // signal. The probe is best-effort verification that pm-os landed in
+  // the cache directory we expect; if it doesn't (different cache path,
+  // version mismatch, race), we log to stderr and continue. Throwing
+  // here previously false-alarmed with exit 6 even on healthy installs.
   const probe = probeLayerOne(slug, null, SENTINEL_PLUGIN_NAME);
-  if (!probe.found) {
-    throw new MysecondError(
-      6,
-      `Plugin install reported success but ${marketplaceName(slug)}/${SENTINEL_PLUGIN_NAME} not found in cache. Re-run \`mysecond init\` to retry.`
+  if (!probe.found && !ctx.silent) {
+    process.stderr.write(
+      `[mysecond] note: plugin cache probe for ${marketplaceName(slug)}/${SENTINEL_PLUGIN_NAME} did not match — install reported success, continuing.\n`
     );
   }
 
@@ -457,7 +454,7 @@ function tryFallback(
     if (result.status !== 0) return null;
 
     // Install loop over the LKG plugins. Same sentinel-fail-hard semantics
-    // as the main path: pm-companion-sync MUST install for fallback to count.
+    // as the main path: `pm-os` MUST install for fallback to count.
     for (const plugin of plugins) {
       const installResult = spawnSync(
         'claude',
