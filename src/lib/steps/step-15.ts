@@ -244,12 +244,9 @@ async function runAuthOnlyMint(
       });
       printResumeHint(existing.slug);
     }
-    emitStatus({
-      kind: 'device_code_minted',
-      user_code: existing.user_code,
-      verification_uri: existing.verification_uri,
-      expires_in: pendingAuthSecondsRemaining(existing),
-    });
+    // Reuse path: the original mint already emitted `device_code_minted`.
+    // Re-emitting here would double-count mints in downstream telemetry/
+    // dashboards. Skip — no new event needed for re-displaying the same code.
     return {
       step: 15,
       outcome: { kind: 'completed' },

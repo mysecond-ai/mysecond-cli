@@ -35,11 +35,18 @@ export async function runInit(ctx: CommandContext): Promise<number> {
   // CTO BLOCKING-1: install funnel telemetry. Fire-and-forget — never block
   // install on telemetry. Slug may not be known yet (comes from env or step 4),
   // so send what we have. Completed event fires after all 13 steps succeed.
+  //
+  // Guard against --auth-only: that mode runs only step 15 (device-code mint)
+  // and exits — it is not part of the install funnel. install.completed is
+  // already guarded the same way; firing started without completed would
+  // artificially deflate the funnel ratio.
   const telemetrySlug = process.env.MYSECOND_CUSTOMER_SLUG ?? state.customerSlug ?? 'unknown';
-  void emitTelemetry(ctx, 'mysecond.install.started', {
-    slug: telemetrySlug,
-    resuming: state.initCompletedSteps !== undefined && state.initCompletedSteps.length > 0,
-  });
+  if (!ctx.authOnly) {
+    void emitTelemetry(ctx, 'mysecond.install.started', {
+      slug: telemetrySlug,
+      resuming: state.initCompletedSteps !== undefined && state.initCompletedSteps.length > 0,
+    });
+  }
 
   // Stale-tmp cleanup on resume (CTO-2 + RT-1 lock-scoped — §6.2).
   // Scan ~/.mysecond/marketplaces/, .claude/sync-state.json parent dir,

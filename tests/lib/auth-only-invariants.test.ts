@@ -72,6 +72,17 @@ describe('--auth-only invariants — init-runner', () => {
     expect(source).toContain('ctx.authOnly && entry.number !== 15');
     expect(source).toMatch(/break;/);
   });
+
+  it('does NOT emit install.started telemetry in --auth-only mode', () => {
+    // Mirror of install.completed: started must also be guarded so the funnel
+    // ratio (started → completed) isn't artificially deflated by every
+    // --auth-only run incrementing started without ever incrementing completed.
+    const startedIdx = source.indexOf("'mysecond.install.started'");
+    expect(startedIdx).toBeGreaterThan(0);
+    // Look for the guard within ~500 chars before the emit.
+    const guardWindow = source.slice(Math.max(0, startedIdx - 500), startedIdx);
+    expect(guardWindow).toMatch(/!\s*ctx\.authOnly/);
+  });
 });
 
 describe('--auth-only invariants — step-15 runAuthOnlyMint', () => {
@@ -91,5 +102,20 @@ describe('--auth-only invariants — step-15 runAuthOnlyMint', () => {
   it('writes pending-auth state on a fresh mint', () => {
     // Sanity: the mint path still persists state for --resume to pick up.
     expect(source).toContain('writePendingAuth(ctx.rootDir, state)');
+  });
+
+  it('does NOT emit device_code_minted on the reuse path', () => {
+    // The reuse branch displays an existing device code. The original mint
+    // already emitted `device_code_minted`; re-emitting here would
+    // double-count mints in downstream telemetry/dashboards. Assert that
+    // between the reuse-branch entry and its `return` there is no
+    // `device_code_minted` emit.
+    const reuseIdx = source.indexOf('isPendingAuthExpired(existing)');
+    expect(reuseIdx).toBeGreaterThan(0);
+    // Find the matching return statement that closes the reuse branch.
+    const reuseReturnIdx = source.indexOf("message: ctx.silent", reuseIdx);
+    expect(reuseReturnIdx).toBeGreaterThan(reuseIdx);
+    const reuseBlock = source.slice(reuseIdx, reuseReturnIdx);
+    expect(reuseBlock).not.toContain("kind: 'device_code_minted'");
   });
 });
