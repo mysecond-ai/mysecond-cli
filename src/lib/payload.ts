@@ -126,6 +126,12 @@ export const CONTEXT_DIR = 'context';
 // Server PER_FILE_LIMIT is 50KB. Pre-filter to skip wasted round-trips.
 export const CONTEXT_PER_FILE_LIMIT = 50 * 1024;
 
+// Filenames under context/ that are auto-generated metadata, not real context
+// files. These must not sync to context_files. PMO-4: `index.md` is generated
+// by various tools as a directory listing/index — treating it as user-edited
+// context pollutes the server-side context_files table.
+const EXCLUDED_CONTEXT_FILENAMES = new Set<string>(['index.md']);
+
 // Classify a write event's file path as a context file. Same path-safety
 // gate as classifyArtifactType — leading '/', traversal, absolute paths
 // rejected. Only `.md` files under `context/` qualify; nested paths
@@ -138,7 +144,15 @@ export const CONTEXT_PER_FILE_LIMIT = 50 * 1024;
 export function isContextFile(relativePath: string): boolean {
   if (relativePath.startsWith('/') || relativePath.includes('..')) return false;
   if (!relativePath.toLowerCase().startsWith(CONTEXT_DIR + '/')) return false;
-  return relativePath.toLowerCase().endsWith('.md');
+  if (!relativePath.toLowerCase().endsWith('.md')) return false;
+
+  // PMO-4: filter auto-generated index files; they're metadata, not context.
+  const filename = relativePath.split('/').pop()?.toLowerCase();
+  if (filename !== undefined && EXCLUDED_CONTEXT_FILENAMES.has(filename)) {
+    return false;
+  }
+
+  return true;
 }
 
 // Classify a write event's file path into an artifact_type for PostToolUse.
@@ -230,6 +244,8 @@ function walkContextDir(
       continue;
     }
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    // PMO-4: skip auto-generated metadata files (mirrors isContextFile).
+    if (EXCLUDED_CONTEXT_FILENAMES.has(entry.name.toLowerCase())) continue;
 
     let content: string;
     try {

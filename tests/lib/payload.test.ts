@@ -144,6 +144,24 @@ describe('isContextFile', () => {
     expect(isContextFile('context/company.MD')).toBe(true);
     expect(isContextFile('context/product.Md')).toBe(true);
   });
+
+  // PMO-4: index.md is auto-generated metadata, not a real context file. Must
+  // not sync to context_files even though it lives under context/.
+  it('rejects auto-generated index.md', () => {
+    expect(isContextFile('context/index.md')).toBe(false);
+    expect(isContextFile('context/Index.md')).toBe(false);
+    expect(isContextFile('context/INDEX.MD')).toBe(false);
+  });
+
+  it('rejects index.md in nested context paths', () => {
+    expect(isContextFile('context/personas/index.md')).toBe(false);
+    expect(isContextFile('context/sub/deep/index.md')).toBe(false);
+  });
+
+  it('still accepts other files alongside excluded index.md', () => {
+    expect(isContextFile('context/company.md')).toBe(true);
+    expect(isContextFile('context/personas/buyer.md')).toBe(true);
+  });
 });
 
 describe('scanContextFiles', () => {
