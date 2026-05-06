@@ -166,9 +166,13 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       if (!ctx.silent) {
         process.stdout.write('\nDRY-RUN PASSED — would exit 0 on real run.\n');
       }
-    } else {
+    } else if (!ctx.authOnly) {
       // CTO BLOCKING-1: emit install.completed on first-time success.
       // Re-runs (resume from partial) still emit — server can deduplicate on slug.
+      // Guard against false positives from --auth-only: that mode mints a
+      // device code and exits without completing the install. Emitting
+      // install.completed on auth-only would inflate the install funnel
+      // top-of-funnel metric for every two-command run.
       void emitTelemetry(ctx, 'mysecond.install.completed', {
         slug: sctx.shared.customerId ?? telemetrySlug,
       });

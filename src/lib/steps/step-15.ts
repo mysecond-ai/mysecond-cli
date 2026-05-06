@@ -228,6 +228,37 @@ function printResumeHint(slug: string): void {
 async function runAuthOnlyMint(
   ctx: CommandContext,
 ): Promise<{ step: number; outcome: { kind: 'completed' }; message?: string }> {
+  // RED-TEAM: if a customer runs `--auth-only` twice without `--resume` in
+  // between, a fresh mint would overwrite the previous pending-auth state.
+  // The first device_code is then orphaned server-side; if the customer
+  // authorized that one (e.g., from a chat that surfaced the first code),
+  // `--resume` polls the SECOND code and fails silently. Reuse any unexpired
+  // pending state instead of minting fresh.
+  const existing = readPendingAuth(ctx.rootDir);
+  if (existing !== null && !isPendingAuthExpired(existing)) {
+    if (!ctx.silent) {
+      printAuthBanner({
+        user_code: existing.user_code,
+        verification_uri: existing.verification_uri,
+        expires_in: pendingAuthSecondsRemaining(existing),
+      });
+      printResumeHint(existing.slug);
+    }
+    emitStatus({
+      kind: 'device_code_minted',
+      user_code: existing.user_code,
+      verification_uri: existing.verification_uri,
+      expires_in: pendingAuthSecondsRemaining(existing),
+    });
+    return {
+      step: 15,
+      outcome: { kind: 'completed' },
+      message: ctx.silent
+        ? undefined
+        : 'step 15: reusing unexpired device code (auth-only mode)',
+    };
+  }
+
   const installId = getOrCreateInstallId();
   const codeOpts = {
     apiBase: ctx.apiBase,
