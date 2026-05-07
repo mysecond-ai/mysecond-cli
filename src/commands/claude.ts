@@ -49,17 +49,7 @@
 //   Documented in the wrapper's final report.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import {
-  createReadStream,
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  rmSync,
-  unlinkSync,
-} from 'node:fs';
-import { pipeline } from 'node:stream/promises';
-import { extract as tarExtract } from 'tar';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 
 import type { CommandContext } from '../lib/context.js';
 import { findLastKnownGood, cacheLastKnownGood } from '../lib/last-known-good.js';
@@ -71,11 +61,15 @@ import {
   validateSlug,
 } from '../lib/mysecond-paths.js';
 import { atomicRenameDir } from '../lib/atomic-write.js';
+import { fetchAndExtractPlugin, type PluginTarballMeta } from '../lib/plugin-tarball.js';
 import { readSyncState } from '../lib/sync-state.js';
 import { join } from 'node:path';
 
 const TARBALL_TIMEOUT_MS = 5_000;
 
+// Local alias: the canonical PluginTarballMeta has `expires_at` which the
+// metadata endpoint omits in the wrapper's path. We accept the narrower shape
+// and widen with a synthetic expires_at when handing off to fetchAndExtractPlugin.
 interface TarballMeta {
   signed_url: string;
   sha256: string;
@@ -85,11 +79,11 @@ interface TarballMeta {
 /**
  * Entry point for `mysecond claude [...args]`.
  *
- * Returns the exit code that the parent CLI should propagate. In the typical
- * case (success), this function calls `process.exit` itself from inside the
- * spawned-child handler — the returned promise never actually resolves on the
- * happy path. Returning a number is reserved for the "couldn't even spawn
- * claude" branch (ENOENT → exit 127).
+ * Returns the exit code that the parent CLI should propagate. The spawned
+ * child's exit/error handlers resolve the returned promise with the appropriate
+ * code; `main()` then returns that code, and the top-level entry in
+ * `src/index.ts` calls `process.exit(code)`. Signal-terminated children are
+ * re-raised on this process before resolving (see `execClaude` for details).
  */
 export async function runClaude(
   args: readonly string[],
@@ -184,7 +178,7 @@ async function tryRefreshTarball(ctx: CommandContext): Promise<void> {
   }
 
   try {
-    await downloadVerifyExtract(slug, meta);
+    await downloadVerifyExtract(ctx, slug, meta);
     // Update LKG so the next launch's version compare sees the new value.
     cacheLastKnownGood(
       slug,
@@ -269,12 +263,17 @@ async function fetchTarballMeta(
 
 /**
  * Download the tarball, verify SHA-256, extract into the customer marketplace
- * dir via atomic rename. Mirrors step-9.ts main path but trimmed: no
- * `claude plugin install` re-run (the plugin is already registered with
+ * dir via atomic rename. Delegates the download/verify/extract trio to
+ * `fetchAndExtractPlugin` (same code path step-9 uses) so we get its actionable
+ * 401/403 CDN messaging + 30 s slow-loris timeout for free, then wraps it with
+ * the wrapper-specific marketplace.json preservation + atomic swap.
+ *
+ * No `claude plugin install` re-run: the plugin is already registered with
  * Claude Code from `mysecond init`; replacing files in-place under
- * ~/.mysecond/marketplaces/customer-{slug}/plugin/ is sufficient).
+ * ~/.mysecond/marketplaces/customer-{slug}/plugin/ is sufficient.
  */
 async function downloadVerifyExtract(
+  ctx: CommandContext,
   slug: string,
   meta: TarballMeta
 ): Promise<void> {
@@ -286,50 +285,12 @@ async function downloadVerifyExtract(
   rmSync(tmpMarketplace, { recursive: true, force: true });
   mkdirSync(tmpExtract, { recursive: true });
 
-  // Download with streaming SHA computation.
-  const response = await fetch(meta.signed_url, { method: 'GET' });
-  if (!response.ok) {
-    throw new Error(`signed-URL HTTP ${response.status}`);
-  }
-  if (response.body === null) {
-    throw new Error('signed-URL empty body');
-  }
-
-  const hash = createHash('sha256');
-  const out = createWriteStream(tmpTarball);
-  const reader = response.body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      hash.update(value);
-      if (!out.write(value)) {
-        await new Promise<void>((resolve) => out.once('drain', () => resolve()));
-      }
-    }
-  } finally {
-    out.end();
-    await new Promise<void>((resolve, reject) => {
-      out.once('finish', () => resolve());
-      out.once('error', (e) => reject(e));
-    });
-  }
-
-  const actual = hash.digest('hex');
-  if (actual !== meta.sha256) {
-    try {
-      unlinkSync(tmpTarball);
-    } catch {
-      // best-effort
-    }
-    throw new Error('SHA-256 mismatch');
-  }
-
-  // Extract.
-  await pipeline(
-    createReadStream(tmpTarball),
-    tarExtract({ cwd: tmpExtract, strict: true, strip: 0 })
-  );
+  // Canonical helper handles: GET signed_url with 30s timeout, streaming
+  // SHA-256 verify, tarball extract. Throws MysecondError on CDN 401/403 with
+  // actionable copy. We widen the meta shape with a synthetic expires_at since
+  // the helper's type requires it but doesn't read it.
+  const fullMeta: PluginTarballMeta = { ...meta, expires_at: '' };
+  await fetchAndExtractPlugin(ctx, fullMeta, tmpTarball, tmpExtract);
 
   // Preserve the existing outer `.claude-plugin/marketplace.json` so Claude
   // Code's marketplace registration survives the swap. The CLI's outer
@@ -356,10 +317,23 @@ async function downloadVerifyExtract(
 }
 
 /**
+ * Signals we forward from the wrapper to the spawned claude child. SIGINT
+ * (Ctrl-C in TTY also delivered to whole process group, but a programmatic
+ * `kill <wrapper-pid>` would skip the child — explicit forwarding closes that
+ * gap). SIGTERM is the standard polite-shutdown signal sent by init systems
+ * and `kill`. SIGHUP fires when the controlling terminal closes — we want
+ * claude to see it too. Adversarial-review fix (T5 P1-2).
+ */
+const FORWARDED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+
+/**
  * Spawn the real `claude` binary, propagating stdio, exit code, and signals.
- * Returns the exit code only on the "couldn't spawn at all" path (ENOENT).
- * Otherwise process.exit is called from inside the child handler — function
- * never returns.
+ * Returns the exit code only on the "couldn't spawn at all" path (ENOENT
+ * / sync spawn failure). On the happy path the returned promise resolves with
+ * the child's exit code; the caller (`runClaude` → `main()` → `src/index.ts`)
+ * calls `process.exit(code)`. Signal-terminated children re-raise the signal
+ * on this process before resolving so the parent shell sees the canonical
+ * "killed by SIGINT" semantics.
  */
 function execClaude(args: readonly string[]): Promise<number> {
   return new Promise((resolve) => {
@@ -375,7 +349,33 @@ function execClaude(args: readonly string[]): Promise<number> {
       return;
     }
 
+    // Forward SIGINT/SIGTERM/SIGHUP to the child so a programmatic
+    // `kill <wrapper-pid>` doesn't orphan claude. Track handlers so we can
+    // remove them on child exit and avoid leaking listeners across multiple
+    // wrapper runs in the same Node process (e.g., during tests).
+    const handlers = new Map<NodeJS.Signals, () => void>();
+    for (const sig of FORWARDED_SIGNALS) {
+      const handler = (): void => {
+        // Best-effort: child may have already exited. `kill` throws ESRCH
+        // in that case; swallow it.
+        try {
+          child.kill(sig);
+        } catch {
+          // best-effort
+        }
+      };
+      handlers.set(sig, handler);
+      process.on(sig, handler);
+    }
+    const cleanup = (): void => {
+      for (const [sig, handler] of handlers) {
+        process.off(sig, handler);
+      }
+      handlers.clear();
+    };
+
     child.on('error', (err: NodeJS.ErrnoException) => {
+      cleanup();
       if (err.code === 'ENOENT') {
         // Match step-9.ts pattern: surface a clear install message.
         process.stderr.write(
@@ -392,6 +392,7 @@ function execClaude(args: readonly string[]): Promise<number> {
     });
 
     child.on('exit', (code, signal) => {
+      cleanup();
       if (signal !== null) {
         // Re-raise the signal on ourselves so the parent shell sees the
         // canonical "killed by SIGINT" semantics rather than exit 130.
@@ -411,5 +412,7 @@ export const __testing = {
   fetchTarballMeta,
   downloadVerifyExtract,
   tryRefreshTarball,
+  execClaude,
+  FORWARDED_SIGNALS,
   TARBALL_TIMEOUT_MS,
 };

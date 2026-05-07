@@ -273,6 +273,122 @@ describe('mysecond claude — fetchTarballMeta direct', () => {
   });
 });
 
+describe('mysecond claude — execClaude signal forwarding', () => {
+  it('forwards SIGINT/SIGTERM/SIGHUP from parent to spawned child (P1-2)', async () => {
+    // Stub child_process.spawn to return a fake child we can observe.
+    const killCalls: string[] = [];
+    const childListeners = new Map<string, (...args: unknown[]) => void>();
+    const fakeChild = {
+      kill: (sig: NodeJS.Signals) => {
+        killCalls.push(sig);
+        return true;
+      },
+      on: (event: string, cb: (...args: unknown[]) => void) => {
+        childListeners.set(event, cb);
+        return fakeChild;
+      },
+    };
+
+    vi.doMock('node:child_process', () => ({
+      spawn: vi.fn(() => fakeChild),
+    }));
+
+    // Snapshot signal listeners installed before execClaude runs so we can
+    // diff and invoke ONLY the wrapper's listeners (avoids tripping vitest's
+    // own SIGINT handler, which would kill the worker).
+    const before = {
+      SIGINT: process.listeners('SIGINT').slice(),
+      SIGTERM: process.listeners('SIGTERM').slice(),
+      SIGHUP: process.listeners('SIGHUP').slice(),
+    } as const;
+
+    const mod = await import('../../src/commands/claude.js');
+    const execPromise = mod.__testing.execClaude([]);
+    // Yield so execClaude registers its handlers.
+    await Promise.resolve();
+
+    // Find the listener execClaude added (set diff against the snapshot).
+    const newListeners = (sig: 'SIGINT' | 'SIGTERM' | 'SIGHUP'): NodeJS.SignalsListener[] =>
+      process.listeners(sig).filter((l) => !before[sig].includes(l));
+
+    expect(newListeners('SIGINT').length).toBe(1);
+    expect(newListeners('SIGTERM').length).toBe(1);
+    expect(newListeners('SIGHUP').length).toBe(1);
+
+    // Invoke directly — bypasses default Node SIGINT behavior.
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+      const [fn] = newListeners(sig);
+      fn?.(sig);
+    }
+
+    expect(killCalls).toEqual(['SIGINT', 'SIGTERM', 'SIGHUP']);
+
+    // Drive child exit so execClaude resolves + cleans up its listeners.
+    const exitCb = childListeners.get('exit');
+    exitCb?.(0, null);
+    await execPromise;
+
+    // After cleanup, no leftover wrapper listeners on these signals.
+    expect(newListeners('SIGINT').length).toBe(0);
+    expect(newListeners('SIGTERM').length).toBe(0);
+    expect(newListeners('SIGHUP').length).toBe(0);
+
+    vi.doUnmock('node:child_process');
+  });
+});
+
+describe('mysecond claude — download timeout (P1-3)', () => {
+  it('aborts the signed-URL download when AbortSignal fires (slow-loris guard)', async () => {
+    const { downloadAndVerifyTarball, TARBALL_DOWNLOAD_TIMEOUT_MS } =
+      await import('../../src/lib/plugin-tarball.js');
+
+    expect(TARBALL_DOWNLOAD_TIMEOUT_MS).toBeGreaterThan(0);
+
+    // Capture the AbortSignal fetch was invoked with.
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: unknown, init: { signal?: AbortSignal }) => {
+        capturedSignal = init.signal;
+        return new Promise<Response>((_, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            const e = new Error('aborted');
+            e.name = 'AbortError';
+            reject(e);
+          });
+        });
+      })
+    );
+
+    const destFile = join(fakeHome, 'tarball.tgz');
+
+    // Manually abort the signal we captured to simulate timeout firing.
+    const downloadPromise = downloadAndVerifyTarball(
+      {
+        signed_url: 'https://cdn.example.test/x.tgz',
+        sha256: 'sha-fake',
+        version: '1.0.0',
+        expires_at: '',
+      },
+      destFile
+    );
+
+    // Yield so fetch has been called and signal captured.
+    await Promise.resolve();
+    expect(capturedSignal).toBeDefined();
+    // Confirm the signal IS an AbortSignal with timeout semantics — its
+    // existence is what guards against slow-loris.
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+
+    // Fire abort and confirm download rejects (our slow-loris fix wires the
+    // timeout signal into the fetch call).
+    const ac = new AbortController();
+    capturedSignal?.dispatchEvent(new Event('abort'));
+    void ac;
+    await expect(downloadPromise).rejects.toThrow();
+  });
+});
+
 describe('mysecond claude — slug validation guard', () => {
   it('writes stderr warning and bails on bad slug in sync-state', async () => {
     // Path-traversal slug — validateSlug should reject.

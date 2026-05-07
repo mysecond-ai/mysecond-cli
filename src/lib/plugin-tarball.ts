@@ -17,6 +17,13 @@ export interface PluginTarballMeta {
   expires_at: string;
 }
 
+// Slow-loris guard: the signed-URL CDN fetch could otherwise stall the
+// caller indefinitely. 30 s is generous for a multi-MB plugin tarball but
+// short enough to bound `mysecond claude`'s startup latency in the worst
+// case. Adversarial-review fix (T5 P1-3): also benefits step-9 since both
+// paths funnel through `downloadAndVerifyTarball`.
+export const TARBALL_DOWNLOAD_TIMEOUT_MS = 30_000;
+
 // Download the tarball from a signed URL into `destFile`, verifying the SHA-256
 // against the server-supplied checksum. Returns true on first-attempt success;
 // caller decides retry policy.
@@ -25,7 +32,10 @@ export async function downloadAndVerifyTarball(
   destFile: string
 ): Promise<void> {
   // Stream to disk so we never hold a multi-MB plugin in RAM.
-  const response = await fetch(meta.signed_url, { method: 'GET' });
+  const response = await fetch(meta.signed_url, {
+    method: 'GET',
+    signal: AbortSignal.timeout(TARBALL_DOWNLOAD_TIMEOUT_MS),
+  });
   if (!response.ok) {
     // RED-TEAM R2 P0-B: actionable copy for CDN-side rejections (NOT our
     // server). 401/403 from a signed URL = either the URL expired mid-fetch
