@@ -3,9 +3,9 @@
 // What this test covers (the "did the env var actually land?" coverage):
 //   - Solo customer (workspace_scope=solo) → no MYSECOND_TEAM_JOIN, no
 //     MYSECOND_TEAM_* in creds.
-//   - Team owner (workspace_scope=team, role=owner) → no MYSECOND_TEAM_JOIN
-//     (owners run the admin welcome, not the invited-PM welcome). Team
-//     binding lines also OMITTED for owners — only invited PMs need the
+//   - Team admin (workspace_scope=team, role=admin) → no MYSECOND_TEAM_JOIN
+//     (admins run the admin welcome, not the invited-PM welcome). Team
+//     binding lines also OMITTED for admins/HoPs — only invited PMs need the
 //     hook (T1) team_id binding to short-circuit team-mode logic.
 //   - Invited PM (workspace_scope=team, role=pm) → MYSECOND_TEAM_JOIN=true in
 //     settings.json AND MYSECOND_TEAM_ID/MYSECOND_TEAM_SLUG in project-scoped
@@ -137,15 +137,15 @@ describe('Track T3 — Solo customer (no team-join)', () => {
   });
 });
 
-describe('Track T3 — team owner (workspace_scope=team, role=owner)', () => {
-  it('omits MYSECOND_TEAM_JOIN (owners run admin welcome, not invited-PM welcome)', async () => {
+describe('Track T3 — team admin (workspace_scope=team, role=admin)', () => {
+  it('omits MYSECOND_TEAM_JOIN (admins run admin welcome, not invited-PM welcome)', async () => {
     if (process.platform === 'win32') return;
-    // step-15's applyWhoamiToShared computes isTeamJoin=false for owners
+    // step-15's applyWhoamiToShared computes isTeamJoin=false for admins/HoPs
     // even when team_id / team_slug / workspace_scope=team are set.
     const sctx = makeStepCtx({
       teamId: TEAM_ID,
       teamSlug: TEAM_SLUG,
-      teamMembershipRole: 'owner',
+      teamMembershipRole: 'admin',
       isTeamJoin: false, // <-- the contract from isTeamJoin()
     });
 

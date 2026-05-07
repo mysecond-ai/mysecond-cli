@@ -6,7 +6,8 @@
 //     authored value wins on conflict).
 //   - MYSECOND_TEAM_JOIN=true (Track T3, Closure D2) — set ONLY when step-15's
 //     /whoami flagged this user as an invited PM joining an existing team
-//     (workspace_scope === "team" AND team_membership_role !== "owner").
+//     (workspace_scope === "team" AND server-computed is_invited_pm === true,
+//     which is role === 'pm' — schema has no 'owner' role).
 //     T4's welcome skill reads this to skip the Solo company/product/personas
 //     extraction and run a personal-preferences flow instead.
 //

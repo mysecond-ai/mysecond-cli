@@ -31,15 +31,17 @@ export interface StepContext {
     // - teamId / teamSlug: bound into project-scoped credentials by step-5b
     //   so the hook (T1) can verify team_mode binding rather than infer it
     //   from CLAUDE.md (P1 — Codex review).
-    // - teamMembershipRole: drives the isTeamJoin decision. Anything except
-    //   'owner' (and non-null) means the user is an invited PM.
-    // - isTeamJoin: pre-computed by step 15 via api/whoami.ts#isTeamJoin so
-    //   step-5b / step-6 / step-13 share one source of truth. When false
-    //   (Solo, team owner, or whoami missing fields) all team-join writes
-    //   no-op and the customer gets the existing Solo welcome.
+    // - teamMembershipRole: 'admin' | 'head_of_product' | 'pm'. The schema
+    //   has no 'owner' role — admins/HoPs are the team admins who set
+    //   everything up.
+    // - isTeamJoin: pre-computed by step 15 via api/whoami.ts#isTeamJoin
+    //   (which keys off the server-computed `is_invited_pm` boolean). When
+    //   false (Solo, team admin/HoP, or whoami missing fields) all
+    //   team-join writes no-op and the customer gets the existing Solo
+    //   welcome.
     teamId?: string;
     teamSlug?: string;
-    teamMembershipRole?: 'owner' | 'admin' | 'pm';
+    teamMembershipRole?: 'admin' | 'head_of_product' | 'pm';
     isTeamJoin?: boolean;
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;

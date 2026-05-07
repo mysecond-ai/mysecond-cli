@@ -224,34 +224,35 @@ describe('isTeamJoin — detection rule', () => {
       team_slug: 'acme',
       user_id: 'user-uuid',
       team_membership_role: 'pm',
+      is_invited_pm: true,
       workspace_scope: 'team',
       scopes: [],
       ...overrides,
     };
   }
 
-  it('returns true for invited-PM (workspace_scope=team, role=pm)', () => {
+  it('returns true for invited-PM (workspace_scope=team, is_invited_pm=true)', () => {
     expect(isTeamJoin(w({}))).toBe(true);
   });
 
-  it('returns true for invited admin (role=admin, not owner)', () => {
-    expect(isTeamJoin(w({ team_membership_role: 'admin' }))).toBe(true);
+  it('returns false for team admin (role=admin, is_invited_pm=false)', () => {
+    expect(isTeamJoin(w({ team_membership_role: 'admin', is_invited_pm: false }))).toBe(false);
   });
 
-  it('returns false for team owner (role=owner)', () => {
-    expect(isTeamJoin(w({ team_membership_role: 'owner' }))).toBe(false);
+  it('returns false for head_of_product (role=head_of_product, is_invited_pm=false)', () => {
+    expect(isTeamJoin(w({ team_membership_role: 'head_of_product', is_invited_pm: false }))).toBe(false);
   });
 
   it('returns false for Solo (workspace_scope=solo)', () => {
-    expect(isTeamJoin(w({ workspace_scope: 'solo', team_membership_role: null }))).toBe(false);
+    expect(isTeamJoin(w({ workspace_scope: 'solo', team_membership_role: null, is_invited_pm: false }))).toBe(false);
   });
 
-  it('returns false when role is null (pre-T2 server response)', () => {
-    expect(isTeamJoin(w({ team_membership_role: null }))).toBe(false);
+  it('returns false when is_invited_pm is false (pre-T2 server response)', () => {
+    expect(isTeamJoin(w({ is_invited_pm: false, team_membership_role: null }))).toBe(false);
   });
 
   it('returns false when workspace_scope is null (pre-T2 server response)', () => {
-    expect(isTeamJoin(w({ workspace_scope: null }))).toBe(false);
+    expect(isTeamJoin(w({ workspace_scope: null, is_invited_pm: false }))).toBe(false);
   });
 
   it('returns false on whoami failure (ok:false)', () => {

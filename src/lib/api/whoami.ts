@@ -13,8 +13,15 @@
 //
 // CONTRACT: server may return any of three shapes.
 //   - Solo customer: `{email, team_id, user_id, scopes, workspace_scope: "solo"}`
-//   - Team owner:   `{email, team_id, ..., workspace_scope: "team", team_slug, team_membership_role: "owner"}`
-//   - Invited PM:   `{email, team_id, ..., workspace_scope: "team", team_slug, team_membership_role: "pm" | "admin"}`
+//   - Team admin/HoP: `{... workspace_scope: "team", team_slug, team_membership_role: "admin" | "head_of_product", is_invited_pm: false}`
+//   - Invited PM:   `{... workspace_scope: "team", team_slug, team_membership_role: "pm", is_invited_pm: true}`
+//
+// Schema reality: team_members.role CHECK is ('admin' | 'head_of_product' | 'pm').
+// There is NO 'owner' role in the database. Earlier drafts of this client
+// listed 'owner' — that was wrong. T2's whoami extension also exposes
+// `is_invited_pm` (server-computed, role === 'pm') so the CLI doesn't have
+// to know schema details. Prefer reading `is_invited_pm` over inspecting
+// the role string directly.
 //
 // `team_slug`, `team_membership_role`, and `workspace_scope` may be missing
 // while T2 hasn't shipped the server-side endpoint extension yet. In that
@@ -40,7 +47,7 @@ declare const __VERSION__: string;
 
 const WHOAMI_TIMEOUT_MS = 10_000;
 
-export type TeamMembershipRole = 'owner' | 'admin' | 'pm';
+export type TeamMembershipRole = 'admin' | 'head_of_product' | 'pm';
 export type WorkspaceScope = 'solo' | 'team';
 
 export interface WhoamiResponse {
@@ -64,10 +71,20 @@ export interface WhoamiResponse {
   user_id: string | null;
   /**
    * Membership role for the calling user inside `team_id`. `null` until T2
-   * ships. Used by Track T3's team-join detection: any non-null role other
-   * than `owner` ⇒ invited PM.
+   * ships. Possible values: 'admin' | 'head_of_product' | 'pm'.
+   * Track T3's team-join detection uses `is_invited_pm` (server-computed)
+   * rather than inspecting this field directly.
    */
   team_membership_role: TeamMembershipRole | null;
+  /**
+   * Server-computed `team_membership_role === 'pm'`. Authoritative input
+   * for T3's team-join detection. `false` for admin/head_of_product (they
+   * are the team admins who set everything up — they get the Solo-style
+   * welcome to extract their team's context). `false` for solo customers
+   * and pre-T2 missing-field responses (safe-degrade fallback per
+   * canonical plan section D2).
+   */
+  is_invited_pm: boolean;
   /**
    * `solo` (single-member synthetic team) or `team` (multi-PM team). `null`
    * until T2 ships the whoami extension. Mirrors the `plugin.tier` value
@@ -85,17 +102,21 @@ export interface WhoamiResponse {
  *
  * Returns `true` iff:
  *   - workspace_scope === "team"  (the calling team is on the Team tier)
- *   - team_membership_role is non-null AND not "owner"
+ *   - server-computed `is_invited_pm === true` (i.e., role === 'pm')
  *
- * Owners get the Solo-style welcome (they are the team admin who set
- * everything up). Solo customers and pre-T2 missing-field responses both
- * return `false` — safe-degrade fallback per canonical plan section D2.
+ * Admins / head_of_product get the Solo-style welcome (they are the team
+ * admin who set everything up). Solo customers and pre-T2 missing-field
+ * responses both return `false` — safe-degrade fallback per canonical
+ * plan section D2.
+ *
+ * Older drafts checked `role !== 'owner'`, but the schema has no 'owner'
+ * role — that check was always-true and would have routed admins through
+ * the invited-PM branch incorrectly.
  */
 export function isTeamJoin(w: WhoamiResponse): boolean {
   if (!w.ok) return false;
   if (w.workspace_scope !== 'team') return false;
-  if (w.team_membership_role === null) return false;
-  return w.team_membership_role !== 'owner';
+  return w.is_invited_pm === true;
 }
 
 function nullsResponse(overrides: Partial<WhoamiResponse> = {}): WhoamiResponse {
@@ -106,6 +127,7 @@ function nullsResponse(overrides: Partial<WhoamiResponse> = {}): WhoamiResponse 
     team_slug: null,
     user_id: null,
     team_membership_role: null,
+    is_invited_pm: false,
     workspace_scope: null,
     scopes: [],
     ...overrides,
@@ -113,8 +135,12 @@ function nullsResponse(overrides: Partial<WhoamiResponse> = {}): WhoamiResponse 
 }
 
 function coerceRole(value: unknown): TeamMembershipRole | null {
-  if (value === 'owner' || value === 'admin' || value === 'pm') return value;
+  if (value === 'admin' || value === 'head_of_product' || value === 'pm') return value;
   return null;
+}
+
+function coerceBool(value: unknown): boolean {
+  return value === true;
 }
 
 function coerceScope(value: unknown): WorkspaceScope | null {
@@ -195,6 +221,7 @@ export async function fetchWhoami(ctx: MinimalCtx): Promise<WhoamiResponse> {
     team_slug: coerceString(body.team_slug),
     user_id: coerceString(body.user_id),
     team_membership_role: coerceRole(body.team_membership_role),
+    is_invited_pm: coerceBool(body.is_invited_pm),
     workspace_scope: coerceScope(body.workspace_scope),
     scopes: coerceScopes(body.scopes),
   };
