@@ -26,6 +26,21 @@ export interface StepContext {
     // Used by step-13 to emit the install_completed JSON status event with
     // the customer's email in the message field.
     userEmail?: string;
+    // Track T3 (Closure D2): step 15's /whoami response also surfaces team
+    // membership so downstream steps can branch on invited-PM team-join.
+    // - teamId / teamSlug: bound into project-scoped credentials by step-5b
+    //   so the hook (T1) can verify team_mode binding rather than infer it
+    //   from CLAUDE.md (P1 — Codex review).
+    // - teamMembershipRole: drives the isTeamJoin decision. Anything except
+    //   'owner' (and non-null) means the user is an invited PM.
+    // - isTeamJoin: pre-computed by step 15 via api/whoami.ts#isTeamJoin so
+    //   step-5b / step-6 / step-13 share one source of truth. When false
+    //   (Solo, team owner, or whoami missing fields) all team-join writes
+    //   no-op and the customer gets the existing Solo welcome.
+    teamId?: string;
+    teamSlug?: string;
+    teamMembershipRole?: 'owner' | 'admin' | 'pm';
+    isTeamJoin?: boolean;
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;
     pluginSha256?: string;

@@ -126,7 +126,7 @@ export function runGitignoreGuard(rootDir: string, silent: boolean): void {
   }
 }
 
-export const step5b: StepFn = async ({ ctx }) => {
+export const step5b: StepFn = async ({ ctx, shared }) => {
   // Windows guard — explicit skip + log per CTO review.
   if (process.platform === 'win32') {
     emit(
@@ -171,7 +171,23 @@ export const step5b: StepFn = async ({ ctx }) => {
 
   // Desired on-disk content. ctx.apiBase is always populated by buildContext()
   // (src/lib/context.ts) — env var COMPANION_API_URL || prod default.
-  const wantContent = `${ENV_KEY}=${newKey}\nCOMPANION_API_URL=${ctx.apiBase}\n`;
+  //
+  // Track T3 (Closure D2): when step-15's whoami flagged this as an invited-PM
+  // team-join, bind MYSECOND_TEAM_ID + MYSECOND_TEAM_SLUG into the same file
+  // (chmod 0o600). The hook (T1) reads these to verify team-mode binding
+  // rather than infer from CLAUDE.md (P1 — Codex review). When isTeamJoin is
+  // false (Solo, team owner, whoami missing fields, network error) we omit
+  // the lines entirely — preserves the exact content equality used by step-5b's
+  // idempotency check AND keeps the existing tests' string-equal assertions
+  // passing for Solo customers. Lines are appended in a deterministic order
+  // (TEAM_ID before TEAM_SLUG) so the equality check stays sound across runs.
+  let wantContent = `${ENV_KEY}=${newKey}\nCOMPANION_API_URL=${ctx.apiBase}\n`;
+  if (shared.isTeamJoin === true && shared.teamId !== undefined) {
+    wantContent += `MYSECOND_TEAM_ID=${shared.teamId}\n`;
+    if (shared.teamSlug !== undefined) {
+      wantContent += `MYSECOND_TEAM_SLUG=${shared.teamSlug}\n`;
+    }
+  }
 
   // Read raw on-disk content for full-content comparison (catches URL drift,
   // missing URL line, stale URL — not just key match).
