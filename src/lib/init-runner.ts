@@ -99,13 +99,17 @@ export async function runInit(ctx: CommandContext): Promise<number> {
         break;
       }
 
-      // --resume forces step 15 (device-code OAuth) to re-run regardless of
-      // ledger state. v1.4.2: this is the only way the two-command flow's
-      // poll-only path executes when the customer has a partial install with
-      // step 15 already marked (e.g., legacy --resume callers, or a re-run
-      // after a token revocation).
-      const resumeForcesStep15 = ctx.resume && entry.number === 15;
-      if (isStepComplete(state, entry.number) && !resumeForcesStep15) {
+      // Step 15 (device-code OAuth) always runs, regardless of ledger state.
+      // It is self-idempotent — `fetchWhoami()` validates an existing apiKey
+      // before doing any device-code work, returning instantly on success.
+      // It is also the ONLY mechanism that detects server-side token
+      // revocation: without re-running it, a customer who revoked their
+      // device from the dashboard would silently keep stale credentials and
+      // hit 401s on every subsequent sync with no recovery path. The
+      // happy-path cost is one /whoami round-trip (~200ms). v1.4.3 fix —
+      // before this change, --resume was the only escape valve.
+      const alwaysRunStep15 = entry.number === 15;
+      if (isStepComplete(state, entry.number) && !alwaysRunStep15) {
         if (!ctx.silent) {
           process.stdout.write(`step ${entry.number}/${STEPS.length}: ${entry.description} — already done, skipping\n`);
         }
