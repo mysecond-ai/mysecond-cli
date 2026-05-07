@@ -49,7 +49,7 @@
 //   Documented in the wrapper's final report.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 
 import type { CommandContext } from '../lib/context.js';
 import { findLastKnownGood, cacheLastKnownGood } from '../lib/last-known-good.js';
@@ -240,25 +240,23 @@ async function fetchTarballMeta(
     throw new Error(`HTTP ${response.status}`);
   }
 
-  let body: unknown;
+  let body: Record<string, unknown>;
   try {
-    body = await response.json();
+    body = (await response.json()) as Record<string, unknown>;
   } catch {
     throw new Error('malformed body');
   }
 
+  const { signed_url, sha256, version } = body ?? {};
   if (
-    body === null ||
-    typeof body !== 'object' ||
-    typeof (body as Record<string, unknown>).signed_url !== 'string' ||
-    typeof (body as Record<string, unknown>).sha256 !== 'string' ||
-    typeof (body as Record<string, unknown>).version !== 'string'
+    typeof signed_url !== 'string' ||
+    typeof sha256 !== 'string' ||
+    typeof version !== 'string'
   ) {
     throw new Error('malformed body');
   }
 
-  const b = body as { signed_url: string; sha256: string; version: string };
-  return { signed_url: b.signed_url, sha256: b.sha256, version: b.version };
+  return { signed_url, sha256, version };
 }
 
 /**
@@ -305,7 +303,6 @@ async function downloadVerifyExtract(
   if (existsSync(currentMarketplaceJson)) {
     const tmpMarketplaceJsonDir = join(tmpMarketplace, '.claude-plugin');
     mkdirSync(tmpMarketplaceJsonDir, { recursive: true });
-    const { copyFileSync } = await import('node:fs');
     copyFileSync(
       currentMarketplaceJson,
       join(tmpMarketplaceJsonDir, 'marketplace.json')
