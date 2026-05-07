@@ -100,6 +100,23 @@ export const step15: StepFn = async ({ ctx, shared }) => {
     return runDeviceCodeFlow(ctx, shared);
   }
 
+  // ── default flow: pick up unexpired pending-auth state if present ────
+  // If the customer ran `mysecond init --auth-only` recently and is now
+  // running plain `mysecond init` (without --resume), poll the existing
+  // device_code instead of minting a new one. Without this, plain init
+  // would orphan the pending code (customer authorized code A in browser,
+  // CLI now polls code B — hangs ~9 min then expires). Same logic
+  // --resume uses; promotes it to the default path so customers using
+  // either invocation get the resume behavior.
+  const pending = readPendingAuth(ctx.rootDir);
+  if (pending !== null) {
+    if (!isPendingAuthExpired(pending)) {
+      return runPollOnly(ctx, shared, pending);
+    }
+    // Stale pending state — clear it and fall through to fresh flow.
+    clearPendingAuth(ctx.rootDir);
+  }
+
   // ── ctx.apiKey already populated → validate via /whoami ───────────────
   if (ctx.apiKey.length > 0) {
     // Item 5B: capture email here too so step-13 can emit install_completed
