@@ -57,9 +57,14 @@ import {
   writePendingAuth,
   type PendingAuthState,
 } from '../pending-auth.js';
+import {
+  fetchWhoami as fetchWhoamiShared,
+  isTeamJoin,
+  type WhoamiResponse,
+} from '../api/whoami.js';
 
 import type { CommandContext } from '../context.js';
-import type { StepFn } from './types.js';
+import type { StepContext, StepFn } from './types.js';
 
 declare const __VERSION__: string;
 
@@ -121,9 +126,13 @@ export const step15: StepFn = async ({ ctx, shared }) => {
   if (ctx.apiKey.length > 0) {
     // Item 5B: capture email here too so step-13 can emit install_completed
     // with the customer's email even on the existing-credential-validated path.
+    // Track T3: also captures team_id / team_slug / team_membership_role so
+    // step-5b can bind them into project-scoped creds and step-6 can write
+    // MYSECOND_TEAM_JOIN — even for customers who never run the device-code
+    // flow (i.e., the apiKey was already valid from a prior install).
     const whoami = await fetchWhoami(ctx);
     if (whoami.ok) {
-      if (whoami.email) shared.userEmail = whoami.email;
+      applyWhoamiToShared(shared, whoami);
       return {
         step: 15,
         outcome: { kind: 'completed' },
@@ -148,36 +157,43 @@ export const step15: StepFn = async ({ ctx, shared }) => {
 // ── /whoami validation ─────────────────────────────────────────────────────
 
 /**
- * Probe /whoami with the current apiKey. Three outcomes:
- *   - { ok: true, email } — server returned 200; email captured for step-13.
- *   - { ok: false, email: null } — server explicitly rejected (4xx/5xx);
- *     caller should clear the key and re-authenticate.
- *   - { ok: true, email: null, networkError: true } — network failure /
- *     timeout. Don't lock the customer out on transient blips — trust the
- *     existing key. Worst case the next sync surfaces a 401 and the
- *     customer re-runs init then. Email is unknown so step-13 will fall
- *     back to a generic post-install message.
+ * Thin local wrapper around the shared whoami client (`lib/api/whoami.ts`).
+ * Track T3 (Closure D2) moved the network/timeout policy and the typed
+ * response shape into a shared module so future callers (e.g., `mysecond
+ * doctor`) can reuse it. Step-15 keeps its own thin function so the
+ * call sites below (existing-credential validation, device-code happy
+ * path, --resume poll) stay readable and we have one place to also
+ * propagate the team-join fields onto `shared`.
  */
-async function fetchWhoami(
-  ctx: CommandContext,
-): Promise<{ ok: boolean; email: string | null; networkError?: boolean }> {
-  try {
-    const url = new URL('/api/companion/whoami', ctx.apiBase);
-    const response = await fetch(url, {
-      headers: {
-        authorization: `Bearer ${ctx.apiKey}`,
-        'user-agent': `mysecond-cli/${__VERSION__} (${process.platform}; node-${process.versions.node})`,
-      },
-      signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
-    });
-    if (response.status !== 200) return { ok: false, email: null };
-    const body = (await response.json().catch(() => null)) as { email?: string | null } | null;
-    return { ok: true, email: body?.email ?? null };
-  } catch {
-    // Network error / timeout — trust the existing key (preserves prior
-    // validateExistingKey behavior). Email unknown; step-13 falls back.
-    return { ok: true, email: null, networkError: true };
+async function fetchWhoami(ctx: CommandContext): Promise<WhoamiResponse> {
+  return fetchWhoamiShared({ apiBase: ctx.apiBase, apiKey: ctx.apiKey });
+}
+
+/**
+ * Capture every whoami-derived field onto `shared` in one place. Called
+ * from each happy-path return in step-15 so `shared.userEmail`,
+ * `shared.teamId`, `shared.teamSlug`, `shared.teamMembershipRole`, and
+ * `shared.isTeamJoin` are populated identically regardless of which auth
+ * branch produced the token (existing-credential / device-code / resume).
+ *
+ * Safe-degrade: when whoami had a transient network failure or T2 hasn't
+ * shipped the server-side fields yet, the team_* fields are null and
+ * `isTeamJoin` returns false → downstream steps no-op their team-join
+ * writes and the customer gets the Solo welcome.
+ */
+function applyWhoamiToShared(
+  shared: StepContext['shared'],
+  whoami: WhoamiResponse,
+): void {
+  if (whoami.email !== null) shared.userEmail = whoami.email;
+  if (whoami.team_id !== null) shared.teamId = whoami.team_id;
+  if (whoami.team_slug !== null) shared.teamSlug = whoami.team_slug;
+  if (whoami.team_membership_role !== null) {
+    shared.teamMembershipRole = whoami.team_membership_role;
   }
+  // isTeamJoin is computed even on partial responses — false is the safe
+  // default and matches what downstream steps treat as "no team-join".
+  shared.isTeamJoin = isTeamJoin(whoami);
 }
 
 // ── /revoke (single-token bearer-authed) ───────────────────────────────────
@@ -387,11 +403,10 @@ async function runPollOnly(
   // Successfully exchanged — clear pending state.
   clearPendingAuth(ctx.rootDir);
 
-  // Best-effort whoami for step-13 email.
+  // Best-effort whoami for step-13 email + Track T3 team-join detection.
+  // applyWhoamiToShared no-ops cleanly on networkError / missing fields.
   const whoami = await fetchWhoami(ctx);
-  if (whoami.email) {
-    shared.userEmail = whoami.email;
-  }
+  applyWhoamiToShared(shared, whoami);
 
   if (
     setResult.fallbackReason === 'roundtrip_failed' ||
@@ -500,11 +515,10 @@ async function runDeviceCodeFlow(
   // Mutate ctx for downstream steps.
   (ctx as { apiKey: string }).apiKey = tokenResp.access_token;
 
-  // Best-effort whoami for step-13 email.
+  // Best-effort whoami for step-13 email + Track T3 team-join detection.
+  // applyWhoamiToShared no-ops cleanly on networkError / missing fields.
   const whoami = await fetchWhoami(ctx);
-  if (whoami.email) {
-    shared.userEmail = whoami.email;
-  }
+  applyWhoamiToShared(shared, whoami);
 
   if (
     setResult.fallbackReason === 'roundtrip_failed' ||
