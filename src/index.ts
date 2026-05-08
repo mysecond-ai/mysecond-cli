@@ -5,6 +5,7 @@ import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { runWhereami } from './commands/whereami.js';
 import { runDoctor } from './commands/doctor.js';
+import { runClaude } from './commands/claude.js';
 import { setSilentMode } from './lib/silent-status.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
 import { exitFromError } from './lib/errors.js';
@@ -42,6 +43,11 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     name: 'doctor',
     summary: 'Check install state + token health. Reports next-step command on any failure.',
     run: runDoctor,
+  },
+  {
+    name: 'claude',
+    summary: 'Launch Claude Code with the latest team context (pulls tarball synchronously, then exec).',
+    run: runClaude,
   },
 ];
 
@@ -97,6 +103,18 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   try {
+    // `mysecond claude` is special-cased: every arg after `claude` must be
+    // forwarded to the spawned Claude Code binary verbatim (Claude has its
+    // own --resume, --model, --print, etc. that overlap with mysecond's
+    // global-flag namespace). We bypass parseGlobalFlags entirely and let
+    // ctx pick up COMPANION_API_KEY from env / keychain like every other
+    // command. No mysecond flags are honored for `mysecond claude`.
+    if (match.name === 'claude') {
+      const passThrough = args.slice(1);
+      const ctx = buildContext(parseGlobalFlags([]));
+      return await match.run(passThrough, ctx);
+    }
+
     const flags = parseGlobalFlags(args.slice(1));
     // Workstream B Day 4: enable structured JSON status protocol when --silent.
     // Emissions before this call are no-ops, so order matters — set first.
