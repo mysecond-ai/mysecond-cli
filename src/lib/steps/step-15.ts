@@ -133,12 +133,17 @@ export const step15: StepFn = async ({ ctx, shared }) => {
       };
     }
     // Existing key didn't validate (revoked, expired, or unauthenticatable).
-    // Clear it and fall through to device-code flow.
+    // Snapshot the rejected key before the clear so the message branch can
+    // distinguish "legacy companion_api_key retired" (non-msd_) from a
+    // genuine device-token revoke/expire (msd_). v1.4.4 — server PR3b
+    // stops accepting legacy keys; this messaging tells the customer why.
+    const rejectedKey = ctx.apiKey;
     (ctx as { apiKey: string }).apiKey = '';
     if (!ctx.silent) {
-      process.stdout.write(
-        'step 15: existing credential rejected by server — re-authenticating\n'
-      );
+      const message = rejectedKey.startsWith('msd_')
+        ? 'step 15: existing credential rejected by server — re-authenticating\n'
+        : 'step 15: your legacy team key has been retired — re-authenticating with the device-code flow\n';
+      process.stdout.write(message);
     }
   }
 

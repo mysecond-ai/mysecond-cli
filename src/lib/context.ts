@@ -123,6 +123,31 @@ function loadDotenv(rootDir: string): void {
   }
 }
 
+// v1.4.4 legacy-key warning state. Module-scoped so a single process only
+// emits the marker + prose once even if buildContext is called twice.
+// Exported test-only resetter (legacy_key_warning_reset_for_tests) lets
+// vitest restore the unwarned state between cases.
+let legacyKeyWarningEmitted = false;
+
+export function _legacyKeyWarningResetForTests(): void {
+  legacyKeyWarningEmitted = false;
+}
+
+function emitLegacyKeyWarning(source: 'flag' | 'env', silent: boolean): void {
+  if (legacyKeyWarningEmitted) return;
+  legacyKeyWarningEmitted = true;
+  // Structured marker — always emitted, even under silent. Stable public
+  // contract; format changes follow semver.
+  process.stderr.write(`[mysecond:legacy-key-detected] source=${source}\n`);
+  if (silent) return;
+  // Human prose — suppressed under silent. Never echoes the token value,
+  // prefix, or truncation; source label only.
+  const flagOrEnv = source === 'flag' ? '--api-key value' : 'COMPANION_API_KEY';
+  process.stderr.write(
+    `[mysecond] ⚠️  Your ${flagOrEnv} looks like a legacy team key. It will stop working soon — run \`mysecond init\` to re-authenticate.\n`
+  );
+}
+
 export function buildContext(flags: ParsedFlags): CommandContext {
   // Resolve rootDir BEFORE loading .env (so we know where to look for .env).
   // Precedence: --project-dir flag > $CLAUDE_PROJECT_DIR env > cwd().
@@ -139,7 +164,17 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   // would be empty on subsequent inits and step 4 (/install-ready) would
   // 401. Sourcing here makes idempotent re-runs work correctly:
   //   precedence: --api-key flag > COMPANION_API_KEY env > keychain/file
-  let apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
+  let apiKey: string;
+  let apiKeySource: 'flag' | 'env' | 'keychain' | 'none' = 'none';
+  if (flags.apiKey !== null && flags.apiKey.length > 0) {
+    apiKey = flags.apiKey;
+    apiKeySource = 'flag';
+  } else if (typeof process.env.COMPANION_API_KEY === 'string' && process.env.COMPANION_API_KEY.length > 0) {
+    apiKey = process.env.COMPANION_API_KEY;
+    apiKeySource = 'env';
+  } else {
+    apiKey = '';
+  }
   if (apiKey.length === 0) {
     try {
       // Lazy import to keep `mysecond --version` and `mysecond --help` fast
@@ -147,11 +182,35 @@ export function buildContext(flags: ParsedFlags): CommandContext {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { getDeviceToken } = require('./keychain.js') as typeof import('./keychain.js');
       const fromStorage = getDeviceToken(rootDir);
-      if (fromStorage !== null) apiKey = fromStorage.token;
+      if (fromStorage !== null) {
+        apiKey = fromStorage.token;
+        apiKeySource = 'keychain';
+      }
     } catch {
       // Best-effort. If keychain lookup throws, fall through to empty
       // apiKey; step 15 will run the device-code flow.
     }
+  }
+
+  // v1.4.4: legacy `companion_api_key` deprecation warning.
+  // Source-based gating: keychain-sourced tokens are msd_-prefixed by
+  // construction (setDeviceToken is the only writer). Flag/env-sourced
+  // tokens that don't start with msd_ are the legacy team-shared keys
+  // server-side PR3b will stop accepting. Warn once per process so the
+  // customer can re-auth via `mysecond init` before the cutover.
+  //
+  // Hard rules:
+  //   - Never print token bytes (or prefix/truncation). Bash-tool stderr
+  //     is captured into model context and persisted in transcripts —
+  //     token material there is a leak.
+  //   - Do not call process.exit. isTTY is always false inside Claude
+  //     Code's Bash tool, so a !isTTY hard-fail would misfire for the
+  //     dominant interactive population. Let companionFetch's 401
+  //     surfacing + step-15's rejection path handle headless callers.
+  //   - `[mysecond:legacy-key-detected]` is a stable public contract.
+  //     Format changes (source labels, additional fields) follow semver.
+  if ((apiKeySource === 'flag' || apiKeySource === 'env') && !apiKey.startsWith('msd_')) {
+    emitLegacyKeyWarning(apiKeySource, flags.silent);
   }
 
   // Strategy default: prompt if interactive (TTY) and not silent; cloud-wins otherwise.
