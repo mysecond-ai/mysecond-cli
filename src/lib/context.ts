@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 
 import { MysecondError } from './errors.js';
+import { getDeviceToken } from './keychain.js';
 
 export type ConflictStrategy = 'prompt' | 'cloud-wins' | 'local-wins' | 'skip';
 
@@ -123,6 +124,78 @@ function loadDotenv(rootDir: string): void {
   }
 }
 
+// v1.4.4 — extract the bare token (and paired API URL, if present)
+// from whatever keychain.ts fileGet returned. Two formats live at the
+// same project-scoped path:
+//   1. Bare token (setDeviceToken writes `<token>\n` — current path).
+//   2. Dotenv-style (step-5b writes `COMPANION_API_KEY=<token>\n
+//      COMPANION_API_URL=<url>\n` — legacy path for pre-1.4.2 installs
+//      whose device-code flow never completed).
+// The paired URL matters for staging installs whose COMPANION_API_URL
+// only lives in the project-scoped credentials file (step-5b moved it
+// out of .env). Without recovering it here, a rescued msd_ token would
+// be sent to the production host and 401 anyway. Codex P2 follow-up.
+function normalizeStoredTokenValue(raw: string): { token: string; apiUrl: string | null } {
+  // Bare-token shortcut: no newline AND no equals → return as-is.
+  if (!raw.includes('\n') && !raw.includes('=')) {
+    return { token: raw, apiUrl: null };
+  }
+  let token = raw;
+  let apiUrl: string | null = null;
+  const tokenMatch = raw.match(/^COMPANION_API_KEY=(.+)$/m);
+  if (tokenMatch !== null && tokenMatch[1] !== undefined) {
+    token = tokenMatch[1].trim();
+  }
+  const urlMatch = raw.match(/^COMPANION_API_URL=(.+)$/m);
+  if (urlMatch !== null && urlMatch[1] !== undefined) {
+    apiUrl = urlMatch[1].trim();
+  }
+  return { token, apiUrl };
+}
+
+// v1.4.4 legacy-key warning state. Module-scoped so a single process only
+// emits the marker + prose once even if buildContext is called twice.
+// Exported test-only resetter (legacy_key_warning_reset_for_tests) lets
+// vitest restore the unwarned state between cases.
+let legacyKeyWarningEmitted = false;
+
+export function _legacyKeyWarningResetForTests(): void {
+  legacyKeyWarningEmitted = false;
+}
+
+function emitLegacyKeyWarning(source: 'flag' | 'env', silent: boolean): void {
+  if (legacyKeyWarningEmitted) return;
+  legacyKeyWarningEmitted = true;
+  // Structured marker — always emitted, even under silent. Stable public
+  // contract; format changes follow semver.
+  process.stderr.write(`[mysecond:legacy-key-detected] source=${source}\n`);
+  if (silent) return;
+  // Human prose — suppressed under silent. Never echoes the token value,
+  // prefix, or truncation; source label only.
+  const flagOrEnv = source === 'flag' ? '--api-key value' : 'COMPANION_API_KEY';
+  process.stderr.write(
+    `[mysecond] ⚠️  Your ${flagOrEnv} looks like a legacy team key. It will stop working soon — run \`mysecond init\` to re-authenticate.\n`
+  );
+}
+
+// Keychain-rescue variant. Fires when the env-supplied bearer is legacy
+// (non-msd_) but a valid msd_ device token is present in keychain — we
+// silently prefer the keychain token so callers don't 401-loop, but the
+// stale env var is still flagged so the customer knows to clean it up.
+// The marker carries `keychain-rescue=true` so agent harnesses can
+// distinguish this case from the plain legacy-key-detected event.
+function emitLegacyKeyRescueWarning(silent: boolean): void {
+  if (legacyKeyWarningEmitted) return;
+  legacyKeyWarningEmitted = true;
+  process.stderr.write(
+    `[mysecond:legacy-key-detected] source=env keychain-rescue=true\n`
+  );
+  if (silent) return;
+  process.stderr.write(
+    `[mysecond] ⚠️  Your COMPANION_API_KEY env var is set to a retired legacy key — using the device token from keychain instead. Unset COMPANION_API_KEY in your shell (e.g., remove it from ~/.zshrc / ~/.bashrc) to silence this warning.\n`
+  );
+}
+
 export function buildContext(flags: ParsedFlags): CommandContext {
   // Resolve rootDir BEFORE loading .env (so we know where to look for .env).
   // Precedence: --project-dir flag > $CLAUDE_PROJECT_DIR env > cwd().
@@ -131,7 +204,12 @@ export function buildContext(flags: ParsedFlags): CommandContext {
 
   loadDotenv(rootDir);
 
-  const apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
+  // apiBase precedence: process.env COMPANION_API_URL > rescued-from-keychain
+  // dotenv URL > production default. The "rescued-from-keychain" slot is
+  // filled below if the keychain-rescue branch fires; declare it as `let`
+  // and finalize after resolution so the rescue can override.
+  let apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
+  const apiBaseFromEnv = process.env.COMPANION_API_URL !== undefined;
 
   // Codex P0-1: load device token from keychain at context-build time.
   // The previous design read the token in step 15, but the runner skips
@@ -139,19 +217,109 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   // would be empty on subsequent inits and step 4 (/install-ready) would
   // 401. Sourcing here makes idempotent re-runs work correctly:
   //   precedence: --api-key flag > COMPANION_API_KEY env > keychain/file
-  let apiKey = flags.apiKey ?? process.env.COMPANION_API_KEY ?? '';
-  if (apiKey.length === 0) {
+  //
+  // v1.4.4 keychain-rescue exception: when COMPANION_API_KEY is a legacy
+  // (non-msd_) value AND keychain has a valid msd_ device token, the
+  // keychain wins. Without this rescue, customers with the legacy key
+  // exported in their shell rc (.zshrc, .bashrc) would re-auth on every
+  // run after server PR3b — env keeps clobbering the freshly minted
+  // msd_ token. --api-key flag is explicit user override and is never
+  // rescued.
+  let apiKey = '';
+  let apiKeySource: 'flag' | 'env' | 'keychain' | 'none' = 'none';
+  let keychainRescue = false;
+
+  // Lazy keychain lookup — memoized so the rescue check and the
+  // empty-credential fallback share a single shell-out.
+  let keychainTokenCache: string | null | undefined = undefined;
+  const loadKeychainToken = (): string | null => {
+    if (keychainTokenCache !== undefined) return keychainTokenCache;
     try {
-      // Lazy import to keep `mysecond --version` and `mysecond --help` fast
-      // (they don't need credentials).
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getDeviceToken } = require('./keychain.js') as typeof import('./keychain.js');
       const fromStorage = getDeviceToken(rootDir);
-      if (fromStorage !== null) apiKey = fromStorage.token;
+      keychainTokenCache = fromStorage !== null ? fromStorage.token : null;
     } catch {
-      // Best-effort. If keychain lookup throws, fall through to empty
-      // apiKey; step 15 will run the device-code flow.
+      // Best-effort. If keychain lookup throws, treat as absent.
+      keychainTokenCache = null;
     }
+    return keychainTokenCache;
+  };
+
+  if (flags.apiKey !== null && flags.apiKey.length > 0) {
+    apiKey = flags.apiKey;
+    apiKeySource = 'flag';
+  } else if (typeof process.env.COMPANION_API_KEY === 'string' && process.env.COMPANION_API_KEY.length > 0) {
+    apiKey = process.env.COMPANION_API_KEY;
+    apiKeySource = 'env';
+    // Keychain rescue: legacy env value blocks self-healing after
+    // server PR3b retires the key class. If keychain has a valid msd_
+    // token, prefer it; the warning shifts to "your env is stale, unset
+    // it to silence." Caught by codex review on v1.4.4 PR #28.
+    if (!apiKey.startsWith('msd_')) {
+      const fromKeychain = loadKeychainToken();
+      // Normalize: keychain.ts's fileGet returns the raw file contents.
+      // setDeviceToken writes bare `<token>\n`, but step-5b legacy writes
+      // dotenv-style `COMPANION_API_KEY=<token>\nCOMPANION_API_URL=...`
+      // to the SAME path. Without parsing the latter, file-fallback users
+      // whose first init never completed device-code stay stuck in a
+      // re-auth loop even though a valid msd_ token exists on disk.
+      // Codex P2 follow-up on PR #28.
+      const normalized =
+        fromKeychain !== null ? normalizeStoredTokenValue(fromKeychain) : null;
+      if (normalized !== null && normalized.token.startsWith('msd_')) {
+        apiKey = normalized.token;
+        apiKeySource = 'keychain';
+        keychainRescue = true;
+        // Recover the paired COMPANION_API_URL when shell env didn't
+        // already supply one. Without this, staging-tier installs whose
+        // apiBase only lived in step-5b's project-scoped credentials
+        // would send the rescued msd_ token to the production host and
+        // 401 anyway. Shell env wins if both are set — explicit user
+        // override of staging targeting stays intact.
+        if (!apiBaseFromEnv && normalized.apiUrl !== null) {
+          apiBase = normalized.apiUrl;
+        }
+      }
+    }
+  }
+  if (apiKey.length === 0) {
+    const fromKeychain = loadKeychainToken();
+    if (fromKeychain !== null) {
+      // Normalize the stored value here too, for symmetry with the
+      // rescue branch above. Without this, a customer who follows the
+      // rescue warning and unsets COMPANION_API_KEY would fall into this
+      // branch, get the raw step-5b dotenv blob assigned to ctx.apiKey,
+      // and end up sending a malformed bearer to /whoami. Codex pass-4
+      // P2 — the rescue advice itself was breaking the next-run path.
+      const normalized = normalizeStoredTokenValue(fromKeychain);
+      apiKey = normalized.token;
+      apiKeySource = 'keychain';
+      if (!apiBaseFromEnv && normalized.apiUrl !== null) {
+        apiBase = normalized.apiUrl;
+      }
+    }
+  }
+
+  // v1.4.4: legacy `companion_api_key` deprecation warning.
+  // Source-based gating: keychain-sourced tokens are msd_-prefixed by
+  // construction (setDeviceToken is the only writer). Flag/env-sourced
+  // tokens that don't start with msd_ are the legacy team-shared keys
+  // server-side PR3b will stop accepting. Warn once per process so the
+  // customer can re-auth via `mysecond init` before the cutover.
+  //
+  // Hard rules:
+  //   - Never print token bytes (or prefix/truncation). Bash-tool stderr
+  //     is captured into model context and persisted in transcripts —
+  //     token material there is a leak.
+  //   - Do not call process.exit. isTTY is always false inside Claude
+  //     Code's Bash tool, so a !isTTY hard-fail would misfire for the
+  //     dominant interactive population. Let companionFetch's 401
+  //     surfacing + step-15's rejection path handle headless callers.
+  //   - `[mysecond:legacy-key-detected]` is a stable public contract.
+  //     Format changes (source labels, additional fields) follow semver.
+  if (keychainRescue) {
+    emitLegacyKeyRescueWarning(flags.silent);
+  } else if ((apiKeySource === 'flag' || apiKeySource === 'env') && !apiKey.startsWith('msd_')) {
+    emitLegacyKeyWarning(apiKeySource, flags.silent);
   }
 
   // Strategy default: prompt if interactive (TTY) and not silent; cloud-wins otherwise.
