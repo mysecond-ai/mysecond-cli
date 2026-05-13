@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 
 import { MysecondError } from './errors.js';
+import { getDeviceToken } from './keychain.js';
 
 export type ConflictStrategy = 'prompt' | 'cloud-wins' | 'local-wins' | 'skip';
 
@@ -148,6 +149,24 @@ function emitLegacyKeyWarning(source: 'flag' | 'env', silent: boolean): void {
   );
 }
 
+// Keychain-rescue variant. Fires when the env-supplied bearer is legacy
+// (non-msd_) but a valid msd_ device token is present in keychain — we
+// silently prefer the keychain token so callers don't 401-loop, but the
+// stale env var is still flagged so the customer knows to clean it up.
+// The marker carries `keychain-rescue=true` so agent harnesses can
+// distinguish this case from the plain legacy-key-detected event.
+function emitLegacyKeyRescueWarning(silent: boolean): void {
+  if (legacyKeyWarningEmitted) return;
+  legacyKeyWarningEmitted = true;
+  process.stderr.write(
+    `[mysecond:legacy-key-detected] source=env keychain-rescue=true\n`
+  );
+  if (silent) return;
+  process.stderr.write(
+    `[mysecond] ⚠️  Your COMPANION_API_KEY env var is set to a retired legacy key — using the device token from keychain instead. Unset COMPANION_API_KEY in your shell (e.g., remove it from ~/.zshrc / ~/.bashrc) to silence this warning.\n`
+  );
+}
+
 export function buildContext(flags: ParsedFlags): CommandContext {
   // Resolve rootDir BEFORE loading .env (so we know where to look for .env).
   // Precedence: --project-dir flag > $CLAUDE_PROJECT_DIR env > cwd().
@@ -164,31 +183,57 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   // would be empty on subsequent inits and step 4 (/install-ready) would
   // 401. Sourcing here makes idempotent re-runs work correctly:
   //   precedence: --api-key flag > COMPANION_API_KEY env > keychain/file
-  let apiKey: string;
+  //
+  // v1.4.4 keychain-rescue exception: when COMPANION_API_KEY is a legacy
+  // (non-msd_) value AND keychain has a valid msd_ device token, the
+  // keychain wins. Without this rescue, customers with the legacy key
+  // exported in their shell rc (.zshrc, .bashrc) would re-auth on every
+  // run after server PR3b — env keeps clobbering the freshly minted
+  // msd_ token. --api-key flag is explicit user override and is never
+  // rescued.
+  let apiKey = '';
   let apiKeySource: 'flag' | 'env' | 'keychain' | 'none' = 'none';
+  let keychainRescue = false;
+
+  // Lazy keychain lookup — memoized so the rescue check and the
+  // empty-credential fallback share a single shell-out.
+  let keychainTokenCache: string | null | undefined = undefined;
+  const loadKeychainToken = (): string | null => {
+    if (keychainTokenCache !== undefined) return keychainTokenCache;
+    try {
+      const fromStorage = getDeviceToken(rootDir);
+      keychainTokenCache = fromStorage !== null ? fromStorage.token : null;
+    } catch {
+      // Best-effort. If keychain lookup throws, treat as absent.
+      keychainTokenCache = null;
+    }
+    return keychainTokenCache;
+  };
+
   if (flags.apiKey !== null && flags.apiKey.length > 0) {
     apiKey = flags.apiKey;
     apiKeySource = 'flag';
   } else if (typeof process.env.COMPANION_API_KEY === 'string' && process.env.COMPANION_API_KEY.length > 0) {
     apiKey = process.env.COMPANION_API_KEY;
     apiKeySource = 'env';
-  } else {
-    apiKey = '';
+    // Keychain rescue: legacy env value blocks self-healing after
+    // server PR3b retires the key class. If keychain has a valid msd_
+    // token, prefer it; the warning shifts to "your env is stale, unset
+    // it to silence." Caught by codex review on v1.4.4 PR #28.
+    if (!apiKey.startsWith('msd_')) {
+      const fromKeychain = loadKeychainToken();
+      if (fromKeychain !== null && fromKeychain.startsWith('msd_')) {
+        apiKey = fromKeychain;
+        apiKeySource = 'keychain';
+        keychainRescue = true;
+      }
+    }
   }
   if (apiKey.length === 0) {
-    try {
-      // Lazy import to keep `mysecond --version` and `mysecond --help` fast
-      // (they don't need credentials).
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getDeviceToken } = require('./keychain.js') as typeof import('./keychain.js');
-      const fromStorage = getDeviceToken(rootDir);
-      if (fromStorage !== null) {
-        apiKey = fromStorage.token;
-        apiKeySource = 'keychain';
-      }
-    } catch {
-      // Best-effort. If keychain lookup throws, fall through to empty
-      // apiKey; step 15 will run the device-code flow.
+    const fromKeychain = loadKeychainToken();
+    if (fromKeychain !== null) {
+      apiKey = fromKeychain;
+      apiKeySource = 'keychain';
     }
   }
 
@@ -209,7 +254,9 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   //     surfacing + step-15's rejection path handle headless callers.
   //   - `[mysecond:legacy-key-detected]` is a stable public contract.
   //     Format changes (source labels, additional fields) follow semver.
-  if ((apiKeySource === 'flag' || apiKeySource === 'env') && !apiKey.startsWith('msd_')) {
+  if (keychainRescue) {
+    emitLegacyKeyRescueWarning(flags.silent);
+  } else if ((apiKeySource === 'flag' || apiKeySource === 'env') && !apiKey.startsWith('msd_')) {
     emitLegacyKeyWarning(apiKeySource, flags.silent);
   }
 

@@ -29,6 +29,7 @@ import {
   getProjectScopedCredsDir,
 } from './creds-path.js';
 import { mkdirSync } from 'node:fs';
+import { projectHash } from './project-hash.js';
 
 /** Where the token came from on a successful read. */
 export type TokenStorage = 'keychain' | 'file_fallback';
@@ -82,11 +83,13 @@ function accountFor(absoluteProjectDir: string): string {
   // One keychain entry per project so multiple projects on the same machine
   // can each hold their own device token. Hash via the same project-hash
   // function the rest of the cli uses for path scoping.
-  // We import lazily inside this function to keep the module's top-level
-  // import graph minimal for non-keychain callers.
-
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { projectHash } = require('./project-hash.js') as typeof import('./project-hash.js');
+  // project-hash is imported at module top — was previously a dynamic
+  // require() to keep the import graph minimal, but vitest's TS loader
+  // can't resolve dynamic requires with `.js` extensions inside `.ts`
+  // sources, so unit tests that exercise getDeviceToken/setDeviceToken
+  // would throw MODULE_NOT_FOUND. The top-level import has effectively
+  // zero startup cost (project-hash only imports node:crypto, which is
+  // already loaded by every other code path that hits this file).
   return `device-token-${projectHash(absoluteProjectDir)}`;
 }
 

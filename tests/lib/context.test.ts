@@ -1,10 +1,25 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildContext, parseGlobalFlags, _legacyKeyWarningResetForTests } from '../../src/lib/context.js';
+import { projectHash } from '../../src/lib/project-hash.js';
+
+// Plant a project-scoped credentials file at the path getProjectScopedCredsPath
+// would resolve to under an isolated $HOME. On macOS, getDeviceToken first
+// probes the system keychain via `security`, but the account name is
+// derived from projectHash(projectDir) — a tmp dir hash has effectively
+// zero probability of colliding with a real keychain entry, so the probe
+// returns null and the lookup falls through to this file.
+function plantKeychainTokenForTest(home: string, projectDir: string, token: string): void {
+  const credsDir = join(home, '.mysecond', 'projects', projectHash(projectDir));
+  mkdirSync(credsDir, { recursive: true });
+  const credsFile = join(credsDir, 'credentials');
+  writeFileSync(credsFile, token, { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(credsFile, 0o600);
+}
 
 describe('parseGlobalFlags', () => {
   it('parses no args as defaults', () => {
@@ -267,5 +282,135 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
     process.env.HOME = tmp;
     buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(stderrBuf).toBe('');
+  });
+});
+
+// v1.4.4 keychain-rescue — codex review #28 [P1] follow-up.
+//
+// The original v1.4.4 warning told customers with a legacy COMPANION_API_KEY
+// to "re-authenticate", but after re-auth the env var still wins over the
+// newly minted msd_ token in keychain, so they'd warn-and-re-auth on every
+// run forever. Fix: when the env-supplied value is non-msd_ AND keychain
+// has a valid msd_ token, prefer the keychain token and emit a distinct
+// `keychain-rescue=true` marker so the customer knows to unset the env var.
+//
+// --api-key flag is an explicit override and is NEVER rescued — passing a
+// legacy flag value means the user wants that value, even if it 401s.
+describe('buildContext — v1.4.4 keychain rescue', () => {
+  let savedKey: string | undefined;
+  let savedHome: string | undefined;
+  let savedClaudeDir: string | undefined;
+  let stderrBuf: string;
+  let origWrite: typeof process.stderr.write;
+
+  function captureStderr(): void {
+    origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr.write as unknown) = ((chunk: string | Uint8Array) => {
+      stderrBuf += typeof chunk === 'string' ? chunk : chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+  }
+
+  beforeEach(() => {
+    savedKey = process.env.COMPANION_API_KEY;
+    savedHome = process.env.HOME;
+    savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.COMPANION_API_KEY;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    stderrBuf = '';
+    captureStderr();
+    _legacyKeyWarningResetForTests();
+  });
+
+  afterEach(() => {
+    process.stderr.write = origWrite;
+    if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
+    else process.env.COMPANION_API_KEY = savedKey;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = savedClaudeDir;
+  });
+
+  it('prefers keychain msd_ token over legacy COMPANION_API_KEY env value', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_fresh_device_token_xyz');
+  });
+
+  it('emits the keychain-rescue marker when rescuing a legacy env value', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
+    expect(stderrBuf).toContain('Unset COMPANION_API_KEY in your shell');
+  });
+
+  it('never echoes any portion of either token during rescue', () => {
+    // The rescue path touches both the legacy env value and the rescued
+    // msd_ token. Neither should appear in stderr.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_secret_envvalue';
+    plantKeychainTokenForTest(tmp, tmp, 'msd_secret_keychain_value');
+    buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(stderrBuf).not.toContain('companion_legacy_secret_envvalue');
+    expect(stderrBuf).not.toContain('msd_secret_keychain_value');
+    expect(stderrBuf).not.toContain('secret');
+  });
+
+  it('does NOT rescue when --api-key flag supplies the legacy value (explicit override)', () => {
+    // Flag is documented user override. If a customer passes
+    // --api-key companion_legacy explicitly, they want that value used
+    // even though keychain has a fresher msd_ token. Emit the original
+    // warning (source=flag), not the rescue variant.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    const ctx = buildContext(
+      parseGlobalFlags(['--project-dir', tmp, '--api-key', 'companion_legacy_abc123'])
+    );
+    expect(ctx.apiKey).toBe('companion_legacy_abc123');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=flag');
+    expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
+  it('does NOT rescue when env value is already a valid msd_ token', () => {
+    // An msd_-prefixed env value is legitimate (e.g., test fixture, CI).
+    // Keep the env value, do not switch to keychain, emit nothing.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'msd_env_token_abc';
+    plantKeychainTokenForTest(tmp, tmp, 'msd_keychain_token_xyz');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_env_token_abc');
+    expect(stderrBuf).toBe('');
+  });
+
+  it('falls back to the original legacy-key warning when keychain has no token', () => {
+    // No keychain entry → no rescue possible. Original v1.4.4 warning
+    // fires with source=env (not keychain-rescue=true).
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('companion_legacy_abc123');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env');
+    expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
+  it('rescue marker suppresses prose under --silent but emits the marker', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    buildContext(parseGlobalFlags(['--project-dir', tmp, '--silent']));
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
+    expect(stderrBuf).not.toContain('Unset COMPANION_API_KEY in your shell');
   });
 });
