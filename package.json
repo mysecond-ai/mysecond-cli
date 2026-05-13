@@ -1,6 +1,6 @@
 {
   "name": "@mysecond/cli",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "mySecond PM Operating System — CLI installer and sync agent",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
     "build": "node esbuild.config.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
