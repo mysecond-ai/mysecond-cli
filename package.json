@@ -16,8 +16,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run build && npm run test"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
