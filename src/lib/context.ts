@@ -124,21 +124,33 @@ function loadDotenv(rootDir: string): void {
   }
 }
 
-// v1.4.4 — extract the bare token from whatever keychain.ts fileGet
-// returned. Two formats live at the same project-scoped path:
+// v1.4.4 — extract the bare token (and paired API URL, if present)
+// from whatever keychain.ts fileGet returned. Two formats live at the
+// same project-scoped path:
 //   1. Bare token (setDeviceToken writes `<token>\n` — current path).
 //   2. Dotenv-style (step-5b writes `COMPANION_API_KEY=<token>\n
 //      COMPANION_API_URL=<url>\n` — legacy path for pre-1.4.2 installs
 //      whose device-code flow never completed).
-// Returns the extracted token, or the raw value if neither format
-// matches (defensive — preserves prior behavior for unknown inputs).
-function normalizeStoredTokenValue(raw: string): string {
+// The paired URL matters for staging installs whose COMPANION_API_URL
+// only lives in the project-scoped credentials file (step-5b moved it
+// out of .env). Without recovering it here, a rescued msd_ token would
+// be sent to the production host and 401 anyway. Codex P2 follow-up.
+function normalizeStoredTokenValue(raw: string): { token: string; apiUrl: string | null } {
   // Bare-token shortcut: no newline AND no equals → return as-is.
-  if (!raw.includes('\n') && !raw.includes('=')) return raw;
-  // Dotenv shape: extract the COMPANION_API_KEY line value.
-  const match = raw.match(/^COMPANION_API_KEY=(.+)$/m);
-  if (match !== null && match[1] !== undefined) return match[1].trim();
-  return raw;
+  if (!raw.includes('\n') && !raw.includes('=')) {
+    return { token: raw, apiUrl: null };
+  }
+  let token = raw;
+  let apiUrl: string | null = null;
+  const tokenMatch = raw.match(/^COMPANION_API_KEY=(.+)$/m);
+  if (tokenMatch !== null && tokenMatch[1] !== undefined) {
+    token = tokenMatch[1].trim();
+  }
+  const urlMatch = raw.match(/^COMPANION_API_URL=(.+)$/m);
+  if (urlMatch !== null && urlMatch[1] !== undefined) {
+    apiUrl = urlMatch[1].trim();
+  }
+  return { token, apiUrl };
 }
 
 // v1.4.4 legacy-key warning state. Module-scoped so a single process only
@@ -192,7 +204,12 @@ export function buildContext(flags: ParsedFlags): CommandContext {
 
   loadDotenv(rootDir);
 
-  const apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
+  // apiBase precedence: process.env COMPANION_API_URL > rescued-from-keychain
+  // dotenv URL > production default. The "rescued-from-keychain" slot is
+  // filled below if the keychain-rescue branch fires; declare it as `let`
+  // and finalize after resolution so the rescue can override.
+  let apiBase = process.env.COMPANION_API_URL ?? 'https://app.mysecond.ai';
+  const apiBaseFromEnv = process.env.COMPANION_API_URL !== undefined;
 
   // Codex P0-1: load device token from keychain at context-build time.
   // The previous design read the token in step 15, but the runner skips
@@ -246,12 +263,21 @@ export function buildContext(flags: ParsedFlags): CommandContext {
       // whose first init never completed device-code stay stuck in a
       // re-auth loop even though a valid msd_ token exists on disk.
       // Codex P2 follow-up on PR #28.
-      const normalizedKeychainToken =
+      const normalized =
         fromKeychain !== null ? normalizeStoredTokenValue(fromKeychain) : null;
-      if (normalizedKeychainToken !== null && normalizedKeychainToken.startsWith('msd_')) {
-        apiKey = normalizedKeychainToken;
+      if (normalized !== null && normalized.token.startsWith('msd_')) {
+        apiKey = normalized.token;
         apiKeySource = 'keychain';
         keychainRescue = true;
+        // Recover the paired COMPANION_API_URL when shell env didn't
+        // already supply one. Without this, staging-tier installs whose
+        // apiBase only lived in step-5b's project-scoped credentials
+        // would send the rescued msd_ token to the production host and
+        // 401 anyway. Shell env wins if both are set — explicit user
+        // override of staging targeting stays intact.
+        if (!apiBaseFromEnv && normalized.apiUrl !== null) {
+          apiBase = normalized.apiUrl;
+        }
       }
     }
   }

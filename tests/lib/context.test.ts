@@ -404,6 +404,47 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     expect(stderrBuf).not.toContain('keychain-rescue=true');
   });
 
+  it('recovers paired COMPANION_API_URL from step-5b dotenv credentials during rescue', () => {
+    // Staging customer installed pre-1.4.2 against a non-production host.
+    // step-5b moved both COMPANION_API_KEY and COMPANION_API_URL out of
+    // .env into the project-scoped credentials file. Their shell rc still
+    // has the legacy COMPANION_API_KEY exported but NO COMPANION_API_URL.
+    // Without recovering the URL during rescue, the freshly rescued msd_
+    // token would be sent to https://app.mysecond.ai (production default)
+    // and 401-loop. Codex pass-3 P2.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    delete process.env.COMPANION_API_URL; // ensure file fallback wins
+    plantKeychainTokenForTest(
+      tmp,
+      tmp,
+      'COMPANION_API_KEY=msd_staging_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
+    );
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_staging_token_xyz');
+    expect(ctx.apiBase).toBe('https://staging.mysecond.ai');
+  });
+
+  it('shell COMPANION_API_URL wins over the rescued-from-keychain URL', () => {
+    // Explicit shell env overrides should never be silently overridden
+    // by stored credentials — a developer pointing at a local dev API
+    // via `export COMPANION_API_URL=http://localhost:3000` expects that
+    // to stick even if the keychain holds a staging URL.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    process.env.COMPANION_API_URL = 'http://localhost:3000';
+    plantKeychainTokenForTest(
+      tmp,
+      tmp,
+      'COMPANION_API_KEY=msd_staging_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
+    );
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_staging_token_xyz');
+    expect(ctx.apiBase).toBe('http://localhost:3000');
+  });
+
   it('rescues when the stored credential is in legacy step-5b dotenv format', () => {
     // step-5b writes `COMPANION_API_KEY=msd_xxx\nCOMPANION_API_URL=...` to
     // the SAME project-scoped path keychain.ts's fileGet reads. If
