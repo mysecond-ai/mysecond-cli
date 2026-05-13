@@ -284,8 +284,18 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   if (apiKey.length === 0) {
     const fromKeychain = loadKeychainToken();
     if (fromKeychain !== null) {
-      apiKey = fromKeychain;
+      // Normalize the stored value here too, for symmetry with the
+      // rescue branch above. Without this, a customer who follows the
+      // rescue warning and unsets COMPANION_API_KEY would fall into this
+      // branch, get the raw step-5b dotenv blob assigned to ctx.apiKey,
+      // and end up sending a malformed bearer to /whoami. Codex pass-4
+      // P2 — the rescue advice itself was breaking the next-run path.
+      const normalized = normalizeStoredTokenValue(fromKeychain);
+      apiKey = normalized.token;
       apiKeySource = 'keychain';
+      if (!apiBaseFromEnv && normalized.apiUrl !== null) {
+        apiBase = normalized.apiUrl;
+      }
     }
   }
 

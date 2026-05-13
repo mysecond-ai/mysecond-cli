@@ -298,6 +298,7 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
 // legacy flag value means the user wants that value, even if it 401s.
 describe('buildContext — v1.4.4 keychain rescue', () => {
   let savedKey: string | undefined;
+  let savedUrl: string | undefined;
   let savedHome: string | undefined;
   let savedClaudeDir: string | undefined;
   let stderrBuf: string;
@@ -312,10 +313,16 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
   }
 
   beforeEach(() => {
+    // Codex pass-4 P3: COMPANION_API_URL must be saved/cleared/restored
+    // here. The "shell URL wins" test below sets it explicitly, and
+    // without the restore it leaks into later cases (shuffled or in this
+    // file) and silently masks default/recovered URL behavior.
     savedKey = process.env.COMPANION_API_KEY;
+    savedUrl = process.env.COMPANION_API_URL;
     savedHome = process.env.HOME;
     savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
     delete process.env.COMPANION_API_KEY;
+    delete process.env.COMPANION_API_URL;
     delete process.env.CLAUDE_PROJECT_DIR;
     stderrBuf = '';
     captureStderr();
@@ -326,6 +333,8 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     process.stderr.write = origWrite;
     if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
     else process.env.COMPANION_API_KEY = savedKey;
+    if (savedUrl === undefined) delete process.env.COMPANION_API_URL;
+    else process.env.COMPANION_API_URL = savedUrl;
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
     if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
@@ -402,6 +411,31 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     expect(ctx.apiKey).toBe('companion_legacy_abc123');
     expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env');
     expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
+  it('normalizes stored dotenv credentials in the empty-env fallback path too', () => {
+    // Codex pass-4 P2. The rescue branch handles env-sourced legacy
+    // values, but the empty-credential keychain fallback (when both
+    // --api-key and COMPANION_API_KEY are absent) was assigning the raw
+    // file contents verbatim. The rescue warning explicitly tells the
+    // customer to "unset COMPANION_API_KEY in your shell" — once they
+    // do, the next run lands HERE. Without normalization, ctx.apiKey
+    // becomes the multi-line dotenv blob and /whoami gets a malformed
+    // Authorization header.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    // No COMPANION_API_KEY in env (already deleted in beforeEach).
+    plantKeychainTokenForTest(
+      tmp,
+      tmp,
+      'COMPANION_API_KEY=msd_unset_path_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
+    );
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_unset_path_token_xyz');
+    expect(ctx.apiBase).toBe('https://staging.mysecond.ai');
+    // No warning in this branch — keychain-sourced, source-based gating
+    // means no warning fires regardless of whether we normalized.
+    expect(stderrBuf).toBe('');
   });
 
   it('recovers paired COMPANION_API_URL from step-5b dotenv credentials during rescue', () => {
