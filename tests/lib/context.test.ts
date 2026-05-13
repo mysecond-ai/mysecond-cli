@@ -404,6 +404,45 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     expect(stderrBuf).not.toContain('keychain-rescue=true');
   });
 
+  it('rescues when the stored credential is in legacy step-5b dotenv format', () => {
+    // step-5b writes `COMPANION_API_KEY=msd_xxx\nCOMPANION_API_URL=...` to
+    // the SAME project-scoped path keychain.ts's fileGet reads. If
+    // setDeviceToken never overwrote that file (first init aborted on
+    // device-code prompt), the file-fallback rescue would have failed
+    // because `startsWith('msd_')` doesn't match the dotenv envelope.
+    // Codex P2 follow-up on PR #28 — normalize before the prefix check.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(
+      tmp,
+      tmp,
+      'COMPANION_API_KEY=msd_dotenv_format_xyz\nCOMPANION_API_URL=https://app.mysecond.ai\n'
+    );
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_dotenv_format_xyz');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
+  });
+
+  it('does NOT rescue when stored dotenv contents extract to a non-msd_ value', () => {
+    // Belt-and-suspenders: a stored dotenv file that itself encodes a
+    // legacy COMPANION_API_KEY (e.g., user upgraded step-5b but never
+    // ran device-code) must NOT be treated as a rescue source — the
+    // stored value is just as stale as the env var. Original
+    // legacy-key warning fires, not the rescue variant.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.HOME = tmp;
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(
+      tmp,
+      tmp,
+      'COMPANION_API_KEY=companion_legacy_stored\nCOMPANION_API_URL=https://app.mysecond.ai\n'
+    );
+    buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env');
+    expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
   it('rescue marker suppresses prose under --silent but emits the marker', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
     process.env.HOME = tmp;

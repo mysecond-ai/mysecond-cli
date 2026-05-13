@@ -124,6 +124,23 @@ function loadDotenv(rootDir: string): void {
   }
 }
 
+// v1.4.4 — extract the bare token from whatever keychain.ts fileGet
+// returned. Two formats live at the same project-scoped path:
+//   1. Bare token (setDeviceToken writes `<token>\n` — current path).
+//   2. Dotenv-style (step-5b writes `COMPANION_API_KEY=<token>\n
+//      COMPANION_API_URL=<url>\n` — legacy path for pre-1.4.2 installs
+//      whose device-code flow never completed).
+// Returns the extracted token, or the raw value if neither format
+// matches (defensive — preserves prior behavior for unknown inputs).
+function normalizeStoredTokenValue(raw: string): string {
+  // Bare-token shortcut: no newline AND no equals → return as-is.
+  if (!raw.includes('\n') && !raw.includes('=')) return raw;
+  // Dotenv shape: extract the COMPANION_API_KEY line value.
+  const match = raw.match(/^COMPANION_API_KEY=(.+)$/m);
+  if (match !== null && match[1] !== undefined) return match[1].trim();
+  return raw;
+}
+
 // v1.4.4 legacy-key warning state. Module-scoped so a single process only
 // emits the marker + prose once even if buildContext is called twice.
 // Exported test-only resetter (legacy_key_warning_reset_for_tests) lets
@@ -222,8 +239,17 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     // it to silence." Caught by codex review on v1.4.4 PR #28.
     if (!apiKey.startsWith('msd_')) {
       const fromKeychain = loadKeychainToken();
-      if (fromKeychain !== null && fromKeychain.startsWith('msd_')) {
-        apiKey = fromKeychain;
+      // Normalize: keychain.ts's fileGet returns the raw file contents.
+      // setDeviceToken writes bare `<token>\n`, but step-5b legacy writes
+      // dotenv-style `COMPANION_API_KEY=<token>\nCOMPANION_API_URL=...`
+      // to the SAME path. Without parsing the latter, file-fallback users
+      // whose first init never completed device-code stay stuck in a
+      // re-auth loop even though a valid msd_ token exists on disk.
+      // Codex P2 follow-up on PR #28.
+      const normalizedKeychainToken =
+        fromKeychain !== null ? normalizeStoredTokenValue(fromKeychain) : null;
+      if (normalizedKeychainToken !== null && normalizedKeychainToken.startsWith('msd_')) {
+        apiKey = normalizedKeychainToken;
         apiKeySource = 'keychain';
         keychainRescue = true;
       }
