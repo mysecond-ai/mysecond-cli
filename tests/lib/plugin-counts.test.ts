@@ -198,4 +198,30 @@ describe('countPluginContents', () => {
 
     expect(countPluginContents(workDir).workflows).toBe(3);
   });
+
+  it('stray dirs/files do NOT inflate counts (P2-7 — tightened contract)', () => {
+    makeFlatPluginRoot(workDir);
+    addSkills(workDir, 5); // 5 real skills (each <name>/SKILL.md)
+    addAgents(workDir, 3); // 3 real agents (each <name>.md file)
+    addWorkflows(workDir, 2); // 2 real workflows
+
+    // Decoys that the OLD "count any visible dir" logic would have inflated:
+    //  - a loose file directly under skills/ (not a skill subdir)
+    writeFileSync(join(workDir, 'skills', 'README.md'), '# not a skill');
+    //  - a subdir under skills/ with NO SKILL.md (scratch dir, .git, etc.)
+    mkdirSync(join(workDir, 'skills', 'scratch'), { recursive: true });
+    writeFileSync(join(workDir, 'skills', 'scratch', 'notes.txt'), 'wip');
+    //  - a subdirectory under agents/ (agents must be flat .md files)
+    mkdirSync(join(workDir, 'agents', 'subdir'), { recursive: true });
+    //  - a subdirectory under workflows/
+    mkdirSync(join(workDir, 'workflows', 'subdir'), { recursive: true });
+    //  - a non-.md file under agents/
+    writeFileSync(join(workDir, 'agents', '.DS_Store'), '');
+
+    expect(countPluginContents(workDir)).toEqual({
+      skills: 5,
+      agents: 3,
+      workflows: 2,
+    });
+  });
 });

@@ -5,6 +5,14 @@
 // real content. Counts are intentionally tolerant — missing dirs return 0,
 // non-skill files (READMEs, .DS_Store) are ignored.
 //
+// Counting contract (tightened per Codex P2-7 — a stray dir/file must not
+// inflate counts):
+//   - a SKILL  = a subdirectory of `skills/` that contains a `SKILL.md` file.
+//   - an AGENT = a `.md` FILE directly under `agents/`.
+//   - a WORKFLOW = a `.md` FILE directly under `workflows/`.
+// Anything else (loose files under `skills/`, subdirs under `agents/`, etc.)
+// is not counted.
+//
 // Plugin layout — TWO shapes are supported:
 //
 //   (1) FLAT (current — what product-manager-os actually emits):
@@ -66,19 +74,34 @@ function hasPluginManifest(dir: string): boolean {
   return existsSync(join(dir, '.claude-plugin', 'plugin.json'));
 }
 
-function countDirEntries(dir: string): number {
+// Count skills under a `skills/` dir. A skill is a SUBDIRECTORY that contains a
+// `SKILL.md` file — the Anthropic skill contract. A stray loose file or an
+// empty/marker-less subdir (e.g. `.git`, a scratch dir) does NOT count. This is
+// tighter than "any visible dir" (P2-7): a stray dir under `skills/` no longer
+// inflates the count.
+function countSkills(skillsDir: string): number {
+  let count = 0;
+  for (const name of safeReaddir(skillsDir)) {
+    if (!isVisible(name)) continue;
+    const skillDir = join(skillsDir, name);
+    if (!isDir(skillDir)) continue;
+    if (!existsSync(join(skillDir, 'SKILL.md'))) continue;
+    count += 1;
+  }
+  return count;
+}
+
+// Count agents/workflows under their dir. Each is a single `.md` FILE
+// (`agents/<name>.md`, `workflows/<name>.md`). Subdirectories are NOT counted —
+// a stray dir under `agents/`/`workflows/` no longer inflates the count (P2-7).
+function countMarkdownFiles(dir: string): number {
   let count = 0;
   for (const name of safeReaddir(dir)) {
     if (!isVisible(name)) continue;
+    if (!name.toLowerCase().endsWith('.md')) continue;
     const full = join(dir, name);
     try {
-      const st = statSync(full);
-      if (st.isDirectory()) {
-        count += 1;
-      } else if (st.isFile() && name.toLowerCase().endsWith('.md')) {
-        // Allow flat-file layouts (agents/foo.md, workflows/foo.md) too.
-        count += 1;
-      }
+      if (statSync(full).isFile()) count += 1;
     } catch {
       // unreadable entry; skip
     }
@@ -89,9 +112,9 @@ function countDirEntries(dir: string): number {
 // Count skills/agents/workflows directly under a single plugin root.
 function countOnePlugin(pluginRoot: string): PluginCounts {
   return {
-    skills: countDirEntries(join(pluginRoot, 'skills')),
-    agents: countDirEntries(join(pluginRoot, 'agents')),
-    workflows: countDirEntries(join(pluginRoot, 'workflows')),
+    skills: countSkills(join(pluginRoot, 'skills')),
+    agents: countMarkdownFiles(join(pluginRoot, 'agents')),
+    workflows: countMarkdownFiles(join(pluginRoot, 'workflows')),
   };
 }
 

@@ -369,12 +369,13 @@ async function doStep9(
   // The cli install path never uninstalls prior plugins, so a customer who
   // onboarded in that window and later re-synced now has BOTH the 13 stale
   // plugins AND `pm-os` — every skill appears twice (correct flat name +
-  // abandoned `pm-data:`-prefixed leftover). Uninstall any non-`pm-os` plugin
-  // registered under THIS customer's own marketplace. Scoped strictly to the
-  // customer's slug; best-effort — never fails the install (pm-os already
-  // landed above). No-op for customers who never hit the experiment window.
+  // abandoned `pm-data:`-prefixed leftover). Uninstall the 13 KNOWN experiment
+  // plugins (allowlist) registered under THIS customer's own marketplace.
+  // Scoped strictly to the customer's slug; best-effort — never fails the
+  // install (pm-os already landed above). No-op for customers who never hit
+  // the experiment window.
   try {
-    const prune = pruneStalePlugins(slug, { silent: ctx.silent });
+    const prune = await pruneStalePlugins(slug, { silent: ctx.silent });
     if (!prune.noop) {
       emitStatus({
         kind: 'stale_plugins_pruned',

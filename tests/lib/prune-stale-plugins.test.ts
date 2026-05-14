@@ -1,4 +1,5 @@
-// Tests for prune-stale-plugins.ts — the core Finding #2 ("duplicate skills") fix.
+// Tests for prune-stale-plugins.ts — the core Finding #2 ("duplicate skills")
+// fix, hardened per the Codex adversarial review (cli#32).
 //
 // Strategy:
 //   - planStalePluginPrune: pure function over installed_plugins.json — drive
@@ -6,7 +7,17 @@
 //   - pruneStalePlugins: inject a FAKE `claude` binary (a tiny shell script)
 //     via the `claudeBin` option. The fake records every invocation to a log
 //     file so we can assert exactly which plugins were uninstalled, and can be
-//     made to exit non-zero to exercise the failure path.
+//     made to exit non-zero / hang to exercise the failure + timeout paths.
+//
+// Hardening coverage:
+//   P0-1 path traversal — a malformed ledger key with `..`/`/`/`@` in the
+//        plugin-name segment must NOT be uninstalled or rmSync'd.
+//   P0-2 slug validation — an invalid slug must no-op cleanly (no throw, no
+//        path construction).
+//   P0-3 allowlist — only the 13 KNOWN experiment plugins are pruned; a
+//        legitimate non-pm-os plugin under the marketplace is left alone.
+//   P1-4 cache cleanup only after a successful uninstall.
+//   P2-6 spawnSync timeout — a hung uninstall is a non-fatal failure.
 
 import {
   chmodSync,
@@ -26,6 +37,7 @@ import {
   planStalePluginPrune,
   pruneStalePlugins,
   installedPluginsJsonPath,
+  EXPERIMENT_PLUGINS,
 } from '../../src/lib/prune-stale-plugins.js';
 
 let root: string;
@@ -66,28 +78,50 @@ function makeFakeClaude(exitCode = 0): string {
   return binPath;
 }
 
+// Create a fake `claude` that logs its call then sleeps far longer than the
+// 30s spawnSync timeout — used to exercise the P2-6 timeout path.
+function makeHangingClaude(sleepSeconds: number): string {
+  const logPath = join(root, 'claude-calls.log');
+  const binPath = join(root, 'hanging-claude.sh');
+  writeFileSync(
+    binPath,
+    `#!/bin/sh\necho "$@" >> "${logPath}"\nsleep ${sleepSeconds}\n`,
+  );
+  chmodSync(binPath, 0o755);
+  return binPath;
+}
+
 function readClaudeCalls(): string[] {
   const logPath = join(root, 'claude-calls.log');
   if (!existsSync(logPath)) return [];
   return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
 }
 
-// The 13-plugin-era plugin names (from installed_plugins.json inspection).
-const EXPERIMENT_PLUGINS = [
-  'pm-communication',
-  'pm-competitive',
-  'pm-data',
-  'pm-discovery',
-  'pm-launch',
-  'pm-operations',
-  'pm-planning',
-  'pm-specs',
-  'pm-strategy',
-  'pm-companion-sync',
-  'pm-personas',
-  'pm-workflows',
-  'pm-cc',
-];
+describe('EXPERIMENT_PLUGINS allowlist', () => {
+  it('contains exactly the 13 known experiment plugin names', () => {
+    expect([...EXPERIMENT_PLUGINS].sort()).toEqual(
+      [
+        'pm-cc',
+        'pm-communication',
+        'pm-companion-sync',
+        'pm-competitive',
+        'pm-data',
+        'pm-discovery',
+        'pm-launch',
+        'pm-operations',
+        'pm-personas',
+        'pm-planning',
+        'pm-specs',
+        'pm-strategy',
+        'pm-workflows',
+      ].sort(),
+    );
+  });
+
+  it('is frozen — callers cannot mutate the allowlist at runtime', () => {
+    expect(Object.isFrozen(EXPERIMENT_PLUGINS)).toBe(true);
+  });
+});
 
 describe('planStalePluginPrune', () => {
   it('returns empty plan when the ledger is missing', () => {
@@ -119,7 +153,7 @@ describe('planStalePluginPrune', () => {
     expect(planStalePluginPrune(slug).stalePluginNames).toEqual([]);
   });
 
-  it('NEVER touches another customer\'s entries (slug scoping)', () => {
+  it("NEVER touches another customer's entries (slug scoping)", () => {
     // Two customers on one machine (only happens on test machines). Pruning
     // for customer A must leave customer B's stale plugins completely alone.
     writeLedger([
@@ -151,19 +185,82 @@ describe('planStalePluginPrune', () => {
     ]);
     expect(planStalePluginPrune('t0504b-to57').stalePluginNames).toEqual(['pm-data']);
   });
+
+  // ---- P0-3: allowlist ----
+  it('does NOT prune a non-pm-os plugin that is NOT on the allowlist', () => {
+    // A hypothetical future / beta / support plugin under the customer
+    // marketplace. "not pm-os" is not sufficient — only the 13 known
+    // experiment plugins are pruned.
+    const mkt = 'mysecond-customer-t0504b-to57';
+    writeLedger([
+      `pm-os@${mkt}`,
+      `pm-future-beta@${mkt}`, // legit, not on allowlist → keep
+      `pm-support-tools@${mkt}`, // legit, not on allowlist → keep
+      `pm-data@${mkt}`, // on allowlist → prune
+    ]);
+    expect(planStalePluginPrune('t0504b-to57').stalePluginNames).toEqual(['pm-data']);
+  });
+
+  // ---- P0-1: path traversal ----
+  it('rejects a malformed ledger key whose plugin-name segment has path traversal', () => {
+    // A crafted key whose "<plugin>" segment is `../../cache/.../vercel`.
+    // It DOES end with the customer marketplace suffix, so a naive endsWith()
+    // check passes — but the plugin-name token guard + allowlist must drop it
+    // so it never reaches `claude plugin uninstall` or rmSync.
+    const mkt = 'mysecond-customer-t0504b-to57';
+    writeLedger([
+      `pm-os@${mkt}`,
+      `../../cache/claude-plugins-official/vercel@${mkt}`,
+      `pm-data/../../etc@${mkt}`,
+      `pm-data@${mkt}`, // the one legitimate stale entry
+    ]);
+    // Only the clean allowlisted token survives.
+    expect(planStalePluginPrune('t0504b-to57').stalePluginNames).toEqual(['pm-data']);
+  });
+
+  // ---- P0-2: slug validation ----
+  it('returns empty plan for an invalid slug (no throw, no path construction)', () => {
+    writeLedger([
+      'pm-data@mysecond-customer-../../etc',
+      'pm-os@mysecond-customer-../../etc',
+    ]);
+    // A path-traversal slug must be rejected by validateSlug → empty plan,
+    // empty marketplace, no throw.
+    const plan = planStalePluginPrune('../../etc');
+    expect(plan.stalePluginNames).toEqual([]);
+    expect(plan.marketplace).toBe('');
+  });
+
+  it('returns empty plan for an empty-string slug', () => {
+    expect(planStalePluginPrune('').stalePluginNames).toEqual([]);
+  });
 });
 
 describe('pruneStalePlugins', () => {
-  it('is a no-op when there are no stale plugins', () => {
+  it('is a no-op when there are no stale plugins', async () => {
     writeLedger(['pm-os@mysecond-customer-t0511a-qomg']);
     const fakeClaude = makeFakeClaude(0);
-    const result = pruneStalePlugins('t0511a-qomg', { claudeBin: fakeClaude, silent: true });
+    const result = await pruneStalePlugins('t0511a-qomg', {
+      claudeBin: fakeClaude,
+      silent: true,
+    });
     expect(result.noop).toBe(true);
     expect(result.removed).toEqual([]);
     expect(readClaudeCalls()).toEqual([]); // never shelled out
   });
 
-  it('uninstalls every stale plugin via `claude plugin uninstall`', () => {
+  it('is a no-op for an invalid slug (P0-2 — sync path passes unvalidated slugs)', async () => {
+    writeLedger(['pm-data@mysecond-customer-../../etc']);
+    const fakeClaude = makeFakeClaude(0);
+    const result = await pruneStalePlugins('../../etc', {
+      claudeBin: fakeClaude,
+      silent: true,
+    });
+    expect(result.noop).toBe(true);
+    expect(readClaudeCalls()).toEqual([]);
+  });
+
+  it('uninstalls every stale plugin via `claude plugin uninstall`', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([
@@ -171,7 +268,7 @@ describe('pruneStalePlugins', () => {
       `pm-os@${mkt}`,
     ]);
     const fakeClaude = makeFakeClaude(0);
-    const result = pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+    const result = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
 
     expect(result.noop).toBe(false);
     expect(result.removed.sort()).toEqual([...EXPERIMENT_PLUGINS].sort());
@@ -186,19 +283,36 @@ describe('pruneStalePlugins', () => {
     expect(calls.some((c) => c.includes('pm-os@'))).toBe(false);
   });
 
-  it('records plugins as failed when `claude plugin uninstall` exits non-zero', () => {
+  it('does NOT uninstall a non-allowlist plugin under the marketplace (P0-3)', async () => {
+    const slug = 't0504b-to57';
+    const mkt = `mysecond-customer-${slug}`;
+    writeLedger([
+      `pm-os@${mkt}`,
+      `pm-future-beta@${mkt}`, // legit non-pm-os, not on allowlist
+      `pm-data@${mkt}`, // on allowlist
+    ]);
+    const fakeClaude = makeFakeClaude(0);
+    const result = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+
+    expect(result.removed).toEqual(['pm-data']);
+    const calls = readClaudeCalls();
+    expect(calls).toEqual([`plugin uninstall pm-data@${mkt} --scope user`]);
+    expect(calls.some((c) => c.includes('pm-future-beta'))).toBe(false);
+  });
+
+  it('records plugins as failed when `claude plugin uninstall` exits non-zero', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
     const fakeClaude = makeFakeClaude(1); // every uninstall fails
-    const result = pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+    const result = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
 
     expect(result.noop).toBe(false);
     expect(result.removed).toEqual([]);
     expect(result.failed.sort()).toEqual(['pm-data', 'pm-strategy']);
   });
 
-  it('cleans up the cache dir for a pruned plugin', () => {
+  it('cleans up the cache dir ONLY after a successful uninstall (P1-4)', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-os@${mkt}`]);
@@ -208,20 +322,59 @@ describe('pruneStalePlugins', () => {
     writeFileSync(join(cacheDir, 'marker'), 'stale');
 
     const fakeClaude = makeFakeClaude(0);
-    pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+    await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
 
     expect(existsSync(cacheDir)).toBe(false);
   });
 
-  it('does not throw when the fake binary is missing (ENOENT)', () => {
+  it('does NOT delete the cache dir when uninstall FAILS (P1-4)', async () => {
+    const slug = 't0504b-to57';
+    const mkt = `mysecond-customer-${slug}`;
+    writeLedger([`pm-data@${mkt}`, `pm-os@${mkt}`]);
+    const cacheDir = join(home, '.claude', 'plugins', 'cache', mkt, 'pm-data');
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(join(cacheDir, 'marker'), 'stale');
+
+    const fakeClaude = makeFakeClaude(1); // uninstall fails
+    const result = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+
+    expect(result.failed).toEqual(['pm-data']);
+    // Cache dir MUST survive — deleting it behind a still-registered ledger
+    // entry would break Claude startup.
+    expect(existsSync(cacheDir)).toBe(true);
+  });
+
+  it('does not throw when the fake binary is missing (ENOENT)', async () => {
     const slug = 't0504b-to57';
     writeLedger([`pm-data@mysecond-customer-${slug}`, `pm-os@mysecond-customer-${slug}`]);
     // Point at a nonexistent binary — spawnSync returns status null + error.
-    const result = pruneStalePlugins(slug, {
+    const result = await pruneStalePlugins(slug, {
       claudeBin: join(root, 'does-not-exist'),
       silent: true,
     });
     expect(result.failed).toEqual(['pm-data']);
     expect(result.removed).toEqual([]);
   });
+
+  it('treats a hung uninstall as a non-fatal failure (P2-6 — timeout)', async () => {
+    // The fake `claude` sleeps 35s — longer than the 30s spawnSync timeout in
+    // pruneStalePlugins. spawnSync kills it with SIGTERM; the plugin is
+    // recorded as `failed`, not `removed`, and the function returns cleanly.
+    const slug = 't0504b-to57';
+    const mkt = `mysecond-customer-${slug}`;
+    writeLedger([`pm-data@${mkt}`, `pm-os@${mkt}`]);
+    const cacheDir = join(home, '.claude', 'plugins', 'cache', mkt, 'pm-data');
+    mkdirSync(cacheDir, { recursive: true });
+
+    const hangingClaude = makeHangingClaude(35);
+    const result = await pruneStalePlugins(slug, {
+      claudeBin: hangingClaude,
+      silent: true,
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.failed).toEqual(['pm-data']);
+    // A timed-out uninstall is a failure → cache dir must NOT be deleted.
+    expect(existsSync(cacheDir)).toBe(true);
+  }, 40_000); // bump per-test timeout past the 30s spawnSync timeout
 });

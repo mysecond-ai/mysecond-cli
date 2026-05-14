@@ -591,7 +591,10 @@ export async function runSync(
   // no stale plugins. Never fails the sync.
   if (state.customerSlug !== null && state.customerSlug !== undefined && state.customerSlug !== '') {
     try {
-      const prune = pruneStalePlugins(state.customerSlug, { silent: ctx.silent });
+      // pruneStalePlugins validates the slug internally — the SessionStart
+      // sync path has NO prior validateSlug() on state.customerSlug, so an
+      // invalid/corrupt sync-state.json slug is rejected inside (no-op).
+      const prune = await pruneStalePlugins(state.customerSlug, { silent: ctx.silent });
       if (!prune.noop && prune.removed.length > 0 && !ctx.silent) {
         process.stderr.write(
           `[mysecond] Removed ${prune.removed.length} stale plugin(s) from a prior install: ${prune.removed.join(', ')}\n`
