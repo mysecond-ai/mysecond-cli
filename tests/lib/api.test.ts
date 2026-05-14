@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { contextFilesPush } from '../../src/lib/api.js';
+import { cliSync, contextFilesPush } from '../../src/lib/api.js';
 import type { CommandContext } from '../../src/lib/context.js';
 import type { ContextFilePayload } from '../../src/lib/payload.js';
 
@@ -136,5 +136,62 @@ describe('contextFilesPush', () => {
     await expect(
       contextFilesPush(ctx(), [file('context/a.md', 'a')], { timeoutMs: 50 })
     ).rejects.toThrow(/Cannot reach mysecond\.ai/);
+  });
+});
+
+// P1 (mysecond-app#257): the CLI now sends team_id explicitly when the install
+// flow recorded it in the project-scoped credentials file. Assert the outgoing
+// wire format so a regression that drops the param surfaces here.
+describe('cliSync — team_id query param', () => {
+  let originalFetch: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('includes team_id in the query when opts.teamId is set', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), [], { teamId: 'team-abc-123' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.pathname).toBe('/api/companion/cli-sync');
+    expect(url.searchParams.get('team_id')).toBe('team-abc-123');
+  });
+
+  it('omits team_id from the query when opts.teamId is null', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), [], { teamId: null });
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.has('team_id')).toBe(false);
+  });
+
+  it('omits team_id from the query when opts.teamId is absent', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), []);
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.has('team_id')).toBe(false);
+  });
+
+  it('sends team_id alongside previous_paths and client_base_plugin_version', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), ['context/a.md', 'context/b.md'], {
+      teamId: 'team-xyz',
+      clientBasePluginVersion: 'sha123',
+    });
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.get('team_id')).toBe('team-xyz');
+    expect(url.searchParams.get('previous_paths')).toBe('context/a.md,context/b.md');
+    expect(url.searchParams.get('client_base_plugin_version')).toBe('sha123');
   });
 });

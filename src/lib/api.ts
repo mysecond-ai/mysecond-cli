@@ -88,9 +88,22 @@ async function companionFetch(
 export async function cliSync(
   ctx: CommandContext,
   previousPaths: readonly string[],
-  opts: { timeoutMs?: number; clientBasePluginVersion?: string | null } = {}
+  opts: {
+    timeoutMs?: number;
+    clientBasePluginVersion?: string | null;
+    teamId?: string | null;
+  } = {}
 ): Promise<CliSyncResponse> {
   const query: Record<string, string | undefined> = {};
+  // Explicit client-side tenant scoping: send the team_id the install flow
+  // recorded in the project-scoped credentials file, when present. The server
+  // auto-derives team_id from the credential when this is omitted (see
+  // mysecond-app#257 / cli-sync route), so omitting it is a safe no-op for
+  // Solo customers, team owners, and upgrade customers whose creds file
+  // predates the team-id line.
+  if (opts.teamId) {
+    query['team_id'] = opts.teamId;
+  }
   if (previousPaths.length > 0) {
     query['previous_paths'] = previousPaths.join(',');
   }

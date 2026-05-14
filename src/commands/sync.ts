@@ -372,6 +372,38 @@ function maybeNudgeCredsMigration(ctx: CommandContext): void {
   );
 }
 
+/**
+ * Reads `MYSECOND_TEAM_ID` from the project-scoped credentials file, if
+ * present. step-5b writes this line for invited-PM team-joins; it is absent
+ * for Solo customers, team owners, and upgrade customers whose creds file
+ * predates the team-id write. When absent we return null and `cliSync` omits
+ * `team_id` — the server auto-derives it from the credential, so omitting it
+ * is a safe no-op. Synchronous, local-only read; no network.
+ *
+ * Parsing mirrors step-5b's `readProjectScopedCreds` (same trim + quote-strip).
+ */
+export function readTeamIdFromCreds(rootDir: string): string | null {
+  const credsPath = getProjectScopedCredsPath(rootDir);
+  if (!existsSync(credsPath)) return null;
+  try {
+    const raw = readFileSync(credsPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('MYSECOND_TEAM_ID=')) {
+        const eqIdx = trimmed.indexOf('=');
+        const value = trimmed
+          .slice(eqIdx + 1)
+          .replace(/^["']|["']$/g, '')
+          .trim();
+        return value.length > 0 ? value : null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function runSync(
   _args: readonly string[],
   ctx: CommandContext
@@ -409,6 +441,7 @@ export async function runSync(
     response = await cliSync(ctx, previousPaths, {
       ...cliSyncOpts,
       clientBasePluginVersion: installState.base_plugin_version,
+      teamId: readTeamIdFromCreds(ctx.rootDir),
     });
   } catch (err) {
     const httpCode = err instanceof MysecondError ? err.exitCode : -1;
