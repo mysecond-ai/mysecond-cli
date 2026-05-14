@@ -17,6 +17,9 @@
 //   P0-3 allowlist — only the 13 KNOWN experiment plugins are pruned; a
 //        legitimate non-pm-os plugin under the marketplace is left alone.
 //   P1-4 cache cleanup only after a successful uninstall.
+//   P1-5 concurrency — a second concurrent prune backs off cleanly when the
+//        `~/.claude/plugins/` lock is held; the plan re-read inside the lock
+//        treats an already-pruned ledger as a clean no-op.
 //   P2-6 spawnSync timeout — a hung uninstall is a non-fatal failure.
 
 import {
@@ -31,6 +34,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -86,6 +90,29 @@ function makeHangingClaude(sleepSeconds: number): string {
   writeFileSync(
     binPath,
     `#!/bin/sh\necho "$@" >> "${logPath}"\nsleep ${sleepSeconds}\n`,
+  );
+  chmodSync(binPath, 0o755);
+  return binPath;
+}
+
+// Create a fake `claude` that logs its call AND rewrites the ledger to remove
+// EVERY stale `pm-*@mysecond-customer-*` entry — simulating a concurrent
+// process having finished the prune. Used to prove the plan re-read inside the
+// lock treats an already-pruned ledger as a clean no-op on a subsequent call.
+function makeLedgerClearingClaude(): string {
+  const logPath = join(root, 'claude-calls.log');
+  const binPath = join(root, 'ledger-clearing-claude.sh');
+  const ledgerPath = installedPluginsJsonPath();
+  // POSIX sh: log argv, then overwrite the ledger with a pm-os-only ledger.
+  writeFileSync(
+    binPath,
+    `#!/bin/sh
+echo "$@" >> "${logPath}"
+cat > "${ledgerPath}" <<'JSON'
+{ "version": 2, "plugins": { "pm-os@mysecond-customer-t0504b-to57": [ { "scope": "user", "version": "1.0.0" } ] } }
+JSON
+exit 0
+`,
   );
   chmodSync(binPath, 0o755);
   return binPath;
@@ -377,4 +404,68 @@ describe('pruneStalePlugins', () => {
     // A timed-out uninstall is a failure → cache dir must NOT be deleted.
     expect(existsSync(cacheDir)).toBe(true);
   }, 40_000); // bump per-test timeout past the 30s spawnSync timeout
+});
+
+describe('pruneStalePlugins — concurrency (P1-5)', () => {
+  // The lock anchor: pruneStalePlugins serializes on `~/.claude/plugins/`.
+  function claudePluginsDir(): string {
+    return join(home, '.claude', 'plugins');
+  }
+
+  it('backs off cleanly (no shell-out) when the plugin-dir lock is already held', async () => {
+    const slug = 't0504b-to57';
+    const mkt = `mysecond-customer-${slug}`;
+    writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
+    const fakeClaude = makeFakeClaude(0);
+
+    // Simulate a concurrent `mysecond sync` (every SessionStart) by holding the
+    // `~/.claude/plugins/` lock ourselves. proper-lockfile's retry budget is
+    // 5×100ms — far short of LOCK_STALE_MS — so the second prune can't acquire
+    // it and must back off to a clean no-op rather than stealing the lock.
+    const release = await lockfile.lock(claudePluginsDir(), {
+      retries: { retries: 0 },
+      stale: 600_000,
+    });
+    try {
+      const result = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+      expect(result.noop).toBe(true);
+      expect(result.removed).toEqual([]);
+      expect(result.failed).toEqual([]);
+      // CRITICAL: never shelled out to `claude` while another process held
+      // the lock — no racing uninstalls.
+      expect(readClaudeCalls()).toEqual([]);
+    } finally {
+      await release();
+    }
+
+    // Sanity: once the lock is free, the same prune runs normally.
+    const after = await pruneStalePlugins(slug, { claudeBin: fakeClaude, silent: true });
+    expect(after.noop).toBe(false);
+    expect(after.removed.sort()).toEqual(['pm-data', 'pm-strategy']);
+  });
+
+  it('the plan re-read inside the lock treats an already-pruned ledger as a clean no-op', async () => {
+    const slug = 't0504b-to57';
+    const mkt = `mysecond-customer-${slug}`;
+    writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
+
+    // First prune uses a fake `claude` that ALSO rewrites the ledger to a
+    // pm-os-only state — i.e. by the time it finishes, the ledger looks like a
+    // concurrent process already cleaned everything.
+    const clearingClaude = makeLedgerClearingClaude();
+    const first = await pruneStalePlugins(slug, { claudeBin: clearingClaude, silent: true });
+    expect(first.noop).toBe(false);
+    expect(first.removed.length).toBeGreaterThan(0);
+
+    // Second prune: the ledger now has only pm-os. The plan re-read (both at
+    // function entry AND inside the lock) finds nothing stale → clean no-op,
+    // no shell-out for this second call.
+    const callsAfterFirst = readClaudeCalls().length;
+    const second = await pruneStalePlugins(slug, { claudeBin: clearingClaude, silent: true });
+    expect(second.noop).toBe(true);
+    expect(second.removed).toEqual([]);
+    expect(second.failed).toEqual([]);
+    // No additional `claude` invocations from the second (no-op) call.
+    expect(readClaudeCalls().length).toBe(callsAfterFirst);
+  });
 });

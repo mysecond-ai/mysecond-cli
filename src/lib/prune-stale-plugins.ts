@@ -109,9 +109,27 @@ function isPlainPluginToken(name: string): boolean {
  *  non-fatal failure (the plugin stays; next sync retries). */
 const UNINSTALL_TIMEOUT_MS = 30_000;
 
-/** proper-lockfile settings for the Claude-plugin-dir lock. Mirrors
- *  marketplace-lock.ts: dead-process locks auto-release after 30s. */
-const LOCK_STALE_MS = 30_000;
+/**
+ * proper-lockfile stale window for the Claude-plugin-dir lock.
+ *
+ * This must comfortably EXCEED the worst-case synchronous critical section.
+ * The critical section runs blocking `spawnSync()` in a loop over up to
+ * `EXPERIMENT_PLUGINS.length` plugins, each capped at `UNINSTALL_TIMEOUT_MS`.
+ * While `spawnSync()` blocks the event loop, proper-lockfile's heartbeat timer
+ * CANNOT fire to refresh the lock's mtime — so if the stale window were merely
+ * 30s (one uninstall), a second concurrent `mysecond sync` (every SessionStart)
+ * would treat the still-held lock as stale and steal it mid-prune.
+ *
+ * Worst case = every uninstall hangs to its full timeout: 13 × 30s = 390s.
+ * Add a 60s margin for ledger reads, rmSync, and process scheduling jitter.
+ * Computed from the two source constants so it stays correct if either changes.
+ *
+ * The prune is best-effort + idempotent (plan re-read inside the lock,
+ * "already gone" = success), so a stolen lock would only cause harmless
+ * redundant uninstall attempts — but a stale window this size makes it
+ * airtight regardless.
+ */
+const LOCK_STALE_MS = EXPERIMENT_PLUGINS.length * UNINSTALL_TIMEOUT_MS + 60_000;
 const LOCK_RETRIES = 5;
 const LOCK_MIN_TIMEOUT_MS = 100;
 
