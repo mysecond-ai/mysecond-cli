@@ -43,6 +43,7 @@ import {
 } from '../mysecond-paths.js';
 import { fetchAndExtractPlugin } from '../plugin-tarball.js';
 import { probeLayerOne } from '../plugin-load-detect.js';
+import { pruneStalePlugins } from '../prune-stale-plugins.js';
 import { emitStatus } from '../silent-status.js';
 import { writeSyncState } from '../sync-state.js';
 
@@ -360,6 +361,40 @@ async function doStep9(
   // Surface partial-install state to step-13 for the success box.
   if (failedPlugins.length > 0) {
     shared.failedPlugins = failedPlugins;
+  }
+
+  // Make the install REPLACING, not additive (Finding #2 — "duplicate skills").
+  // During the 2026-05-04→05 multi-category experiment, customers were
+  // installed as 13 separately-named `pm-*` plugins under their marketplace.
+  // The cli install path never uninstalls prior plugins, so a customer who
+  // onboarded in that window and later re-synced now has BOTH the 13 stale
+  // plugins AND `pm-os` — every skill appears twice (correct flat name +
+  // abandoned `pm-data:`-prefixed leftover). Uninstall any non-`pm-os` plugin
+  // registered under THIS customer's own marketplace. Scoped strictly to the
+  // customer's slug; best-effort — never fails the install (pm-os already
+  // landed above). No-op for customers who never hit the experiment window.
+  try {
+    const prune = pruneStalePlugins(slug, { silent: ctx.silent });
+    if (!prune.noop) {
+      emitStatus({
+        kind: 'stale_plugins_pruned',
+        removed: prune.removed,
+        failed: prune.failed,
+      });
+      if (!ctx.silent && prune.removed.length > 0) {
+        process.stderr.write(
+          `[mysecond] Removed ${prune.removed.length} stale plugin(s) from a prior install: ${prune.removed.join(', ')}\n`
+        );
+      }
+    }
+  } catch (err) {
+    // Defense-in-depth: pruneStalePlugins is already best-effort internally,
+    // but an unexpected throw must never abort a successful install.
+    if (!ctx.silent) {
+      process.stderr.write(
+        `[mysecond] note: stale-plugin cleanup skipped (${err instanceof Error ? err.message : String(err)})\n`
+      );
+    }
   }
 
   // Post-install filesystem probe — informational only. The install

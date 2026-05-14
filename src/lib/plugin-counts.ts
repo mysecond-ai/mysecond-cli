@@ -5,23 +5,30 @@
 // real content. Counts are intentionally tolerant — missing dirs return 0,
 // non-skill files (READMEs, .DS_Store) are ignored.
 //
-// Plugin layout (multi-subplugin — what product-manager-os actually emits):
-//   plugin/
-//     <subplugin>/
-//       .claude-plugin/plugin.json    (presence marks a real subplugin)
-//       skills/<skill-name>/SKILL.md  (counted as a skill)
-//       agents/<agent-name>.md        (counted as a sub-agent)
-//       workflows/<workflow>.md       (counted as a workflow — workflows-pack)
-//       commands/<wrapper>.md         (NOT counted — slash-command wrappers
-//                                     around skills, 1:1 with the skills/ dir)
+// Plugin layout — TWO shapes are supported:
 //
-// Subdirs without `.claude-plugin/plugin.json` (e.g. `context-templates/`,
-// `work/`) are skipped silently so they neither contribute nor break counting.
+//   (1) FLAT (current — what product-manager-os actually emits):
+//       plugin/
+//         .claude-plugin/plugin.json    (presence marks the FLAT plugin root)
+//         skills/<skill-name>/SKILL.md  (counted as a skill)
+//         agents/<agent-name>.md        (counted as a sub-agent)
+//         workflows/<workflow>.md       (counted as a workflow)
+//         commands/<wrapper>.md         (NOT counted — slash-command wrappers)
 //
-// If no subplugins are detected, returns zeros — there is no flat-layout
-// fallback. The cli only ever installs product-manager-os, which is always
-// multi-subplugin. Returning zeros triggers the existing fallback string in
-// `successBox` ("pm-os plugin registered with your PM skill library").
+//   (2) MULTI-SUBPLUGIN (legacy — the abandoned 13-category experiment):
+//       plugin/
+//         <subplugin>/
+//           .claude-plugin/plugin.json  (presence marks a real subplugin)
+//           skills/ | agents/ | workflows/  (counted, summed across subplugins)
+//
+// Detection: if `plugin/.claude-plugin/plugin.json` exists, treat as FLAT and
+// count directly under the root. Otherwise fall back to scanning subdirs for
+// the multi-subplugin marker. Subdirs (or a root) without the marker contribute
+// nothing — `context-templates/`, `work/`, READMEs etc. are skipped silently.
+//
+// If neither layout is detected, returns zeros. Returning zeros triggers the
+// existing fallback string in `successBox` ("pm-os plugin registered with your
+// PM skill library").
 
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -55,6 +62,10 @@ function isDir(path: string): boolean {
   }
 }
 
+function hasPluginManifest(dir: string): boolean {
+  return existsSync(join(dir, '.claude-plugin', 'plugin.json'));
+}
+
 function countDirEntries(dir: string): number {
   let count = 0;
   for (const name of safeReaddir(dir)) {
@@ -75,9 +86,28 @@ function countDirEntries(dir: string): number {
   return count;
 }
 
+// Count skills/agents/workflows directly under a single plugin root.
+function countOnePlugin(pluginRoot: string): PluginCounts {
+  return {
+    skills: countDirEntries(join(pluginRoot, 'skills')),
+    agents: countDirEntries(join(pluginRoot, 'agents')),
+    workflows: countDirEntries(join(pluginRoot, 'workflows')),
+  };
+}
+
 export function countPluginContents(pluginDir: string): PluginCounts {
   if (!isDir(pluginDir)) return { ...EMPTY };
 
+  // FLAT layout: the plugin manifest sits at the root. product-manager-os
+  // ships a single `pm-os` plugin with `source: "./"`, so the extracted tree's
+  // root IS the plugin root — skills/agents/workflows live directly under it.
+  if (hasPluginManifest(pluginDir)) {
+    return countOnePlugin(pluginDir);
+  }
+
+  // MULTI-SUBPLUGIN layout (legacy): sum every subdir that carries its own
+  // `.claude-plugin/plugin.json` marker. Subdirs without the marker
+  // (context-templates/, work/) are skipped silently.
   const totals: PluginCounts = { skills: 0, agents: 0, workflows: 0 };
   let foundAnySubplugin = false;
 
@@ -85,12 +115,13 @@ export function countPluginContents(pluginDir: string): PluginCounts {
     if (!isVisible(name)) continue;
     const subDir = join(pluginDir, name);
     if (!isDir(subDir)) continue;
-    if (!existsSync(join(subDir, '.claude-plugin', 'plugin.json'))) continue;
+    if (!hasPluginManifest(subDir)) continue;
 
     foundAnySubplugin = true;
-    totals.skills += countDirEntries(join(subDir, 'skills'));
-    totals.agents += countDirEntries(join(subDir, 'agents'));
-    totals.workflows += countDirEntries(join(subDir, 'workflows'));
+    const sub = countOnePlugin(subDir);
+    totals.skills += sub.skills;
+    totals.agents += sub.agents;
+    totals.workflows += sub.workflows;
   }
 
   if (!foundAnySubplugin) return { ...EMPTY };

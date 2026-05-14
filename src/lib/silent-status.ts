@@ -34,6 +34,7 @@ export type StatusKind =
   | 'install_step_completed'
   | 'plugin_install_timed'       // Fix C Step 1: per-plugin install wall-clock
   | 'step_9_total_timed'         // Fix C Step 1: full step-9 wall-clock + summary
+  | 'stale_plugins_pruned'       // Finding #2: removed orphaned 13-plugin-era pm-* plugins
   | 'install_completed'
   | 'install_failed'
   | 'timeout'

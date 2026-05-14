@@ -29,6 +29,12 @@ function makeSubplugin(root: string, name: string): string {
   return sub;
 }
 
+// Mark a dir as a FLAT plugin root by dropping .claude-plugin/plugin.json into it.
+function makeFlatPluginRoot(root: string): void {
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(root, '.claude-plugin', 'plugin.json'), '{}');
+}
+
 // Add N skill subdirs (each with a SKILL.md file) under <sub>/skills/.
 function addSkills(sub: string, count: number): void {
   for (let i = 0; i < count; i++) {
@@ -107,8 +113,38 @@ describe('countPluginContents', () => {
     });
   });
 
-  it('non-subplugin root (no .claude-plugin/plugin.json anywhere) returns zeros — no flat-layout fallback', () => {
-    // Build a flat layout that the OLD code would have counted.
+  it('FLAT layout (.claude-plugin/plugin.json at root) counts skills/agents/workflows directly', () => {
+    // This is the layout product-manager-os actually emits: a single `pm-os`
+    // plugin with source "./" — skills/agents/workflows live under the root.
+    makeFlatPluginRoot(workDir);
+    addSkills(workDir, 84);
+    addAgents(workDir, 6);
+    addWorkflows(workDir, 7);
+    // commands/ wrappers must NOT be counted as workflows.
+    addCommands(workDir, 84);
+
+    expect(countPluginContents(workDir)).toEqual({
+      skills: 84,
+      agents: 6,
+      workflows: 7,
+    });
+  });
+
+  it('FLAT layout with missing dirs returns zeros for the missing kinds', () => {
+    // Plugin root marker present, but no agents/ or workflows/ dir.
+    makeFlatPluginRoot(workDir);
+    addSkills(workDir, 12);
+
+    expect(countPluginContents(workDir)).toEqual({
+      skills: 12,
+      agents: 0,
+      workflows: 0,
+    });
+  });
+
+  it('no plugin manifest anywhere (no flat root marker, no subplugin marker) returns zeros', () => {
+    // A bare flat layout WITHOUT the .claude-plugin/plugin.json marker is not a
+    // recognizable plugin tree — no marker means we cannot trust the shape.
     mkdirSync(join(workDir, 'skills', 'a'), { recursive: true });
     writeFileSync(join(workDir, 'skills', 'a', 'SKILL.md'), '# s');
     mkdirSync(join(workDir, 'agents'), { recursive: true });
