@@ -34,6 +34,7 @@ import {
   type CompanionFile,
   type ContextFile,
 } from '../lib/payload.js';
+import { pruneStalePlugins } from '../lib/prune-stale-plugins.js';
 import { readSyncState, writeSyncState, type SyncState } from '../lib/sync-state.js';
 
 const TEAM_OVERRIDE_START = '<!-- TEAM_OVERRIDE:START -->';
@@ -578,6 +579,31 @@ export async function runSync(
 
   state.lastSyncedAt = response.syncedAt;
   writeSyncState(ctx.rootDir, state);
+
+  // Self-heal the "duplicate skills" bug (Finding #2) for EXISTING customers.
+  // step-9 (plugin install) is skipped on re-runs once the init ledger is
+  // complete, so a customer who onboarded during the 2026-05-04→05
+  // multi-category experiment window — and now carries 13 orphaned `pm-*`
+  // plugins alongside `pm-os` — would never get cleaned up by `init` alone.
+  // `sync` runs on every SessionStart hook, so pruning here auto-heals them on
+  // their next session. Scoped strictly to this customer's own slug;
+  // best-effort and idempotent — a no-op for the common case where there are
+  // no stale plugins. Never fails the sync.
+  if (state.customerSlug !== null && state.customerSlug !== undefined && state.customerSlug !== '') {
+    try {
+      // pruneStalePlugins validates the slug internally — the SessionStart
+      // sync path has NO prior validateSlug() on state.customerSlug, so an
+      // invalid/corrupt sync-state.json slug is rejected inside (no-op).
+      const prune = await pruneStalePlugins(state.customerSlug, { silent: ctx.silent });
+      if (!prune.noop && prune.removed.length > 0 && !ctx.silent) {
+        process.stderr.write(
+          `[mysecond] Removed ${prune.removed.length} stale plugin(s) from a prior install: ${prune.removed.join(', ')}\n`
+        );
+      }
+    } catch {
+      // Best-effort: stale-plugin cleanup must never fail a sync.
+    }
+  }
 
   // First-sync = no prior server timestamp AND no prior tracked paths. Both
   // checks must use the snapshots captured before any state mutations above.
