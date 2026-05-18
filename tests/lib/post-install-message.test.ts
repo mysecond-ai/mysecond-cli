@@ -141,3 +141,39 @@ describe('successBox: red-team — malicious / missing names', () => {
     expect(out).toContain('for you at your company');
   });
 });
+
+// v1.4.8 — invited-PM variant. HoP already ran /welcome on team's behalf, so
+// the invited PM should be pointed at /prd-generator as a first action rather
+// than told to redo /welcome.
+describe('successBox: invited-PM variant (v1.4.8)', () => {
+  it('directs invited PM to /prd-generator (not /welcome)', () => {
+    const out = successBox('Bob', 'Acme', { skills: 91, agents: 6, workflows: 4 }, true);
+    expect(out).toContain('/prd-generator');
+    expect(out).not.toContain('/welcome');
+  });
+
+  it('mentions installed counts and synced context', () => {
+    const out = successBox('Bob', 'Acme', { skills: 91, agents: 6, workflows: 4 }, true);
+    expect(out).toContain('91 skills');
+    expect(out).toContain('6 sub-agents');
+    expect(out).toContain('4 workflows');
+    expect(out).toContain('context synced successfully');
+  });
+
+  it('still personalizes the lead line with pm + company', () => {
+    const out = successBox('Bob', 'Acme', { skills: 1, agents: 1, workflows: 1 }, true);
+    expect(out).toContain('for Bob at Acme');
+  });
+
+  it('HoP variant (isInvitedPm=false) still recommends /welcome', () => {
+    const out = successBox('Alice', 'Acme', { skills: 1, agents: 1, workflows: 1 }, false);
+    expect(out).toContain('/welcome');
+    expect(out).not.toContain('/prd-generator');
+  });
+
+  it('defaults to HoP variant when 4th param omitted (back-compat)', () => {
+    const out = successBox('Alice', 'Acme', { skills: 1, agents: 1, workflows: 1 });
+    expect(out).toContain('/welcome');
+    expect(out).not.toContain('/prd-generator');
+  });
+});

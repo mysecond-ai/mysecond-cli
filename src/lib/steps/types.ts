@@ -26,6 +26,13 @@ export interface StepContext {
     // Used by step-13 to emit the install_completed JSON status event with
     // the customer's email in the message field.
     userEmail?: string;
+    // Step 15 populates from /whoami `is_invited_pm` field — true when the
+    // authenticated user is a `pm`-role team member (Head-of-Product already
+    // ran /welcome on their behalf). Step-13 branches the success-box copy:
+    // invited PMs should NOT be told to run /welcome again. Defaults to false
+    // on network error / missing field — HoP variant is the safer fallback
+    // (recommends /welcome, which is idempotent).
+    isInvitedPm?: boolean;
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;
     pluginSha256?: string;
