@@ -169,10 +169,32 @@ function formatCountsLine(counts: PostInstallCounts | undefined): string {
 export function successBox(
   pmName: string,
   companyName: string,
-  counts?: PostInstallCounts
+  counts?: PostInstallCounts,
+  isInvitedPm: boolean = false
 ): string {
   const pm = sanitizeName(pmName, 'you');
   const company = sanitizeName(companyName, 'your company');
+
+  // Invited-PM variant: the Head-of-Product (HoP) already ran /welcome and
+  // built the team context. An invited PM landing here has already had their
+  // context synced (step 11), so running /welcome would be redundant — point
+  // them at /prd-generator as a meaningful first action instead.
+  if (isInvitedPm) {
+    const skills = counts?.skills ?? 0;
+    const agents = counts?.agents ?? 0;
+    const workflows = counts?.workflows ?? 0;
+    const lines = [
+      `✓ mySecond PM OS installed for ${pm} at ${company}`,
+      '',
+      `Installation complete. ${skills} ${skills === 1 ? 'skill' : 'skills'}, ${agents} ${agents === 1 ? 'sub-agent' : 'sub-agents'}, and ${workflows} ${workflows === 1 ? 'workflow' : 'workflows'} are installed, and your context synced successfully.`,
+      '',
+      'Quit and reopen Claude Code to load mySecond, then try running /prd-generator to run your first skill.',
+      '',
+      'Need help? Reply at hello@mysecond.ai or open mysecond.ai/dashboard',
+    ];
+    return lines.join('\n');
+  }
+
   const lines = [
     `✓ mySecond PM OS installed for ${pm} at ${company}`,
     '',

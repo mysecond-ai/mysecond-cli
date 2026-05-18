@@ -32,7 +32,7 @@ export const step13: StepFn = async ({ ctx, shared }) => {
   }
 
   if (!ctx.silent) {
-    process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts) + '\n\n');
+    process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts, shared.isInvitedPm ?? false) + '\n\n');
   }
 
   // Emit install_completed JSON status event (Item 5B). Calls

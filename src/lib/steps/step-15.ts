@@ -124,6 +124,7 @@ export const step15: StepFn = async ({ ctx, shared }) => {
     const whoami = await fetchWhoami(ctx);
     if (whoami.ok) {
       if (whoami.email) shared.userEmail = whoami.email;
+      shared.isInvitedPm = whoami.isInvitedPm;
       return {
         step: 15,
         outcome: { kind: 'completed' },
@@ -165,7 +166,7 @@ export const step15: StepFn = async ({ ctx, shared }) => {
  */
 async function fetchWhoami(
   ctx: CommandContext,
-): Promise<{ ok: boolean; email: string | null; networkError?: boolean }> {
+): Promise<{ ok: boolean; email: string | null; isInvitedPm: boolean; networkError?: boolean }> {
   try {
     const url = new URL('/api/companion/whoami', ctx.apiBase);
     const response = await fetch(url, {
@@ -175,13 +176,21 @@ async function fetchWhoami(
       },
       signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
     });
-    if (response.status !== 200) return { ok: false, email: null };
-    const body = (await response.json().catch(() => null)) as { email?: string | null } | null;
-    return { ok: true, email: body?.email ?? null };
+    if (response.status !== 200) return { ok: false, email: null, isInvitedPm: false };
+    const body = (await response.json().catch(() => null)) as
+      | { email?: string | null; is_invited_pm?: boolean }
+      | null;
+    return {
+      ok: true,
+      email: body?.email ?? null,
+      isInvitedPm: body?.is_invited_pm ?? false,
+    };
   } catch {
     // Network error / timeout — trust the existing key (preserves prior
     // validateExistingKey behavior). Email unknown; step-13 falls back.
-    return { ok: true, email: null, networkError: true };
+    // isInvitedPm defaults false → step-13 shows the HoP /welcome variant
+    // (idempotent + the safer fallback when role is unknown).
+    return { ok: true, email: null, isInvitedPm: false, networkError: true };
   }
 }
 
@@ -397,6 +406,7 @@ async function runPollOnly(
   if (whoami.email) {
     shared.userEmail = whoami.email;
   }
+  shared.isInvitedPm = whoami.isInvitedPm;
 
   if (
     setResult.fallbackReason === 'roundtrip_failed' ||
@@ -510,6 +520,7 @@ async function runDeviceCodeFlow(
   if (whoami.email) {
     shared.userEmail = whoami.email;
   }
+  shared.isInvitedPm = whoami.isInvitedPm;
 
   if (
     setResult.fallbackReason === 'roundtrip_failed' ||
