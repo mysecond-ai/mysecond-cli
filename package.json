@@ -1,6 +1,6 @@
 {
   "name": "@mysecond/cli",
-  "version": "1.4.9-rc.1",
+  "version": "1.4.9",
   "description": "mySecond PM Operating System — CLI installer and sync agent",
   "type": "module",
   "bin": {
