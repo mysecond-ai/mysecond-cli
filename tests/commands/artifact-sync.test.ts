@@ -313,3 +313,102 @@ describe('runArtifactSync — context-file branch', () => {
     await expect(runArtifactSync([], ctx(root))).rejects.toMatchObject({ exitCode: 7 });
   });
 });
+
+describe('runArtifactSync — customs v1 branch (.claude/skills, .claude/agents, .claude/workflows)', () => {
+  let originalFetch: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let originalStdin: NodeJS.ReadStream;
+  const savedSessionId = process.env.CLAUDE_SESSION_ID;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    originalStdin = process.stdin;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(process, 'stdin', { value: originalStdin, configurable: true });
+    if (savedSessionId === undefined) delete process.env.CLAUDE_SESSION_ID;
+    else process.env.CLAUDE_SESSION_ID = savedSessionId;
+  });
+
+  it('pushes a customer-created skill via POST /api/companion/files with authored_by stamped', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, '.claude/skills/my-skill'), { recursive: true });
+    writeFileSync(
+      join(root, '.claude/skills/my-skill/SKILL.md'),
+      '---\nname: my-skill\ndescription: test\n---\n\n# my skill\n'
+    );
+    process.env.CLAUDE_SESSION_ID = 'sess_e2e_test';
+    fetchMock.mockResolvedValueOnce(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+    stubStdin(toolEvent('Write', join(root, '.claude/skills/my-skill/SKILL.md')));
+
+    const code = await runArtifactSync([], ctx(root));
+    expect(code).toBe(0);
+
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe('https://app.mysecond.ai/api/companion/files');
+    const body = JSON.parse(init.body as string);
+    expect(body.files).toHaveLength(1);
+    const file = body.files[0];
+    expect(file.file_path).toBe('.claude/skills/my-skill/SKILL.md');
+    expect(file.authored_by).toEqual({
+      kind: 'ai',
+      source: 'claude-code',
+      identity: 'sess_e2e_test',
+    });
+  });
+
+  it('falls back to `${model}:${timestamp}` identity when CLAUDE_SESSION_ID is unset', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, '.claude/agents'), { recursive: true });
+    writeFileSync(join(root, '.claude/agents/reviewer.md'), '# reviewer agent');
+    delete process.env.CLAUDE_SESSION_ID;
+    process.env.CLAUDE_MODEL = 'claude-sonnet-4-7';
+    fetchMock.mockResolvedValueOnce(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+    stubStdin(toolEvent('Write', join(root, '.claude/agents/reviewer.md')));
+
+    await runArtifactSync([], ctx(root));
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).body as string,
+    );
+    expect(body.files[0].authored_by.identity).toMatch(/^claude-sonnet-4-7:\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('pushes workflow files nested under .claude/workflows/<slug>/', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, '.claude/workflows/launch'), { recursive: true });
+    writeFileSync(join(root, '.claude/workflows/launch/step-1.md'), '# step 1');
+    process.env.CLAUDE_SESSION_ID = 'sess_workflow';
+    fetchMock.mockResolvedValueOnce(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+    stubStdin(toolEvent('Write', join(root, '.claude/workflows/launch/step-1.md')));
+
+    const code = await runArtifactSync([], ctx(root));
+    expect(code).toBe(0);
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).body as string,
+    );
+    expect(body.files[0].file_path).toBe('.claude/workflows/launch/step-1.md');
+    expect(body.files[0].authored_by.kind).toBe('ai');
+  });
+
+  it('regular context/ writes do NOT carry an authored_by field', async () => {
+    // Sanity guard: stamping authored_by on every context-file push would
+    // change the wire format for the existing fleet of context syncs and
+    // pollute the receiver's funnel with non-customs rows.
+    const root = tmpProject();
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'hello');
+    process.env.CLAUDE_SESSION_ID = 'sess_should_not_appear';
+    fetchMock.mockResolvedValueOnce(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+    stubStdin(toolEvent('Write', join(root, 'context/company.md')));
+
+    await runArtifactSync([], ctx(root));
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).body as string,
+    );
+    expect(body.files[0].authored_by).toBeUndefined();
+  });
+});

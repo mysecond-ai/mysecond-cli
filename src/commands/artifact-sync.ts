@@ -12,8 +12,10 @@ import { MysecondError } from '../lib/errors.js';
 import { relativeFromRoot, shortHash } from '../lib/files.js';
 import {
   CONTEXT_PER_FILE_LIMIT,
+  buildAuthoredBy,
   classifyArtifactType,
   isContextFile,
+  isCustomsArtifact,
   type ArtifactPayload,
   type ContextFilePayload,
 } from '../lib/payload.js';
@@ -25,6 +27,12 @@ interface ToolEvent {
 }
 
 const MAX_FILE_BYTES = 3_000_000;
+
+// Customs v1 paths (.claude/skills/*, .claude/agents/*, .claude/workflows/*)
+// can carry longer bodies + heavier frontmatter than typical context/ files.
+// Receiver hard cap (mysecond-app) is 3MB total per batch and ~100KB per file
+// for these paths. Pre-filter here to skip a wasted round-trip on outliers.
+const CUSTOMS_PER_FILE_LIMIT = 100 * 1024;
 
 // Tools that write files and therefore produce artifacts worth syncing.
 // Hard-string list intentionally — see TODO. Worth tracking separately because
@@ -71,14 +79,19 @@ export async function runArtifactSync(
   const relativePath = relativeFromRoot(ctx.rootDir, filePath);
   if (relativePath === null) return 0;
 
-  // Context-file branch — checked BEFORE artifact classification so the same
-  // file can never be misrouted (context/foo.md must never be classified as
-  // an artifact, even if some future ARTIFACT_DIRS entry overlapped).
-  if (isContextFile(relativePath)) {
+  // Context-file branch — also handles Customs v1 paths (.claude/skills/*,
+  // .claude/agents/*, .claude/workflows/*). Both go through the same
+  // contextFilesPush endpoint; the receiver (mysecond-app /api/companion/
+  // files) detects origin from the slug + content hash and tags rows for
+  // the Custom tab. Checked BEFORE artifact classification so the same
+  // file can never be misrouted.
+  const customs = isCustomsArtifact(relativePath);
+  if (isContextFile(relativePath) || customs) {
     let content: string;
     try {
       const stat = statSync(filePath);
-      if (stat.size > CONTEXT_PER_FILE_LIMIT) return 0;
+      const limit = customs ? CUSTOMS_PER_FILE_LIMIT : CONTEXT_PER_FILE_LIMIT;
+      if (stat.size > limit) return 0;
       content = readFileSync(filePath, 'utf8');
     } catch {
       return 0;
@@ -90,6 +103,10 @@ export async function runArtifactSync(
       file_path: relativePath,
       content,
       current_hash: hash,
+      // Customs v1: stamp authored_by on customs paths only. Receiver
+      // normalizes unknown shapes to null; regular context/ writes don't
+      // need attribution since they don't feed the Custom-tab funnel.
+      ...(customs ? { authored_by: buildAuthoredBy() } : {}),
     };
 
     try {
@@ -108,7 +125,9 @@ export async function runArtifactSync(
       // kill switch (exitCode 7), exit non-zero so subsequent PostToolUse events
       // also stop. Other errors stay best-effort.
       if (err instanceof MysecondError && err.exitCode === 7) throw err;
-      // Best-effort: TODO(telemetry) emit PostHog event when telemetry lands.
+      // Best-effort: TODO(telemetry) emit sync.artifactSync.failed PostHog
+      // event when telemetry lands. CAIO P1 ask; deferred because the CLI
+      // currently has no PostHog wiring (only docs TODOs).
     }
     return 0;
   }

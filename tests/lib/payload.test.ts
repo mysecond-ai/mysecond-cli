@@ -2,12 +2,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   ARTIFACT_DIRS,
+  buildAuthoredBy,
   classifyArtifactType,
   isContextFile,
+  isCustomsArtifact,
   scanArtifacts,
   scanContextFiles,
 } from '../../src/lib/payload.js';
@@ -319,5 +321,99 @@ describe('scanArtifacts', () => {
     writeFileSync(join(root, 'work/.hidden/outputs/secret.md'), 'leak');
 
     expect(scanArtifacts(root)).toEqual([]);
+  });
+});
+
+describe('isCustomsArtifact', () => {
+  it('matches customer skill paths under .claude/skills/<slug>/', () => {
+    expect(isCustomsArtifact('.claude/skills/prd-generator/SKILL.md')).toBe(true);
+    expect(isCustomsArtifact('.claude/skills/my-skill/example.md')).toBe(true);
+    expect(isCustomsArtifact('.CLAUDE/Skills/Mixed-Case/SKILL.md')).toBe(true); // case-insensitive
+  });
+
+  it('matches sub-agent paths flat under .claude/agents/', () => {
+    expect(isCustomsArtifact('.claude/agents/reviewer.md')).toBe(true);
+    expect(isCustomsArtifact('.claude/agents/cto-tech-lead.md')).toBe(true);
+  });
+
+  it('matches workflow files nested under .claude/workflows/<slug>/', () => {
+    expect(isCustomsArtifact('.claude/workflows/launch-checklist/step-1.md')).toBe(true);
+    expect(isCustomsArtifact('.claude/workflows/onboarding/intro.md')).toBe(true);
+  });
+
+  it('rejects bare files under .claude/ root', () => {
+    expect(isCustomsArtifact('.claude/SETTINGS.md')).toBe(false);
+    expect(isCustomsArtifact('.claude/skills/SKILL.md')).toBe(false); // missing slug dir
+  });
+
+  it('rejects nested-too-deep skill paths', () => {
+    // Spec is .claude/skills/<slug>/<single-segment>.md — deeper nesting is
+    // not a recognized customs artifact (could be tests/, examples/foo/bar/).
+    expect(isCustomsArtifact('.claude/skills/foo/bar/baz.md')).toBe(false);
+  });
+
+  it('rejects non-.md files', () => {
+    expect(isCustomsArtifact('.claude/skills/foo/SKILL.txt')).toBe(false);
+    expect(isCustomsArtifact('.claude/agents/reviewer.json')).toBe(false);
+  });
+
+  it('rejects path-traversal and absolute paths', () => {
+    expect(isCustomsArtifact('/abs/.claude/skills/foo/SKILL.md')).toBe(false);
+    expect(isCustomsArtifact('../.claude/skills/foo/SKILL.md')).toBe(false);
+  });
+
+  it('rejects paths outside the .claude/ tree', () => {
+    expect(isCustomsArtifact('context/skills/foo/SKILL.md')).toBe(false);
+    expect(isCustomsArtifact('work/skills/foo/SKILL.md')).toBe(false);
+    expect(isCustomsArtifact('skills/foo/SKILL.md')).toBe(false);
+  });
+});
+
+describe('buildAuthoredBy', () => {
+  const savedSessionId = process.env.CLAUDE_SESSION_ID;
+  const savedModel = process.env.CLAUDE_MODEL;
+
+  afterEach(() => {
+    if (savedSessionId === undefined) delete process.env.CLAUDE_SESSION_ID;
+    else process.env.CLAUDE_SESSION_ID = savedSessionId;
+    if (savedModel === undefined) delete process.env.CLAUDE_MODEL;
+    else process.env.CLAUDE_MODEL = savedModel;
+  });
+
+  it('uses CLAUDE_SESSION_ID as identity when set (preferred path)', () => {
+    process.env.CLAUDE_SESSION_ID = 'sess_abc123';
+    delete process.env.CLAUDE_MODEL;
+    const result = buildAuthoredBy();
+    expect(result).toEqual({
+      kind: 'ai',
+      source: 'claude-code',
+      identity: 'sess_abc123',
+    });
+  });
+
+  it('falls back to `${model}:${timestamp}` when CLAUDE_SESSION_ID is unset', () => {
+    delete process.env.CLAUDE_SESSION_ID;
+    process.env.CLAUDE_MODEL = 'claude-sonnet-4-7';
+    const result = buildAuthoredBy();
+    expect(result.kind).toBe('ai');
+    expect(result.source).toBe('claude-code');
+    // identity is `${model}:${ISO timestamp}` — never bare model name.
+    expect(result.identity).toMatch(/^claude-sonnet-4-7:\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('falls back to `claude-code:${timestamp}` when BOTH env vars missing', () => {
+    delete process.env.CLAUDE_SESSION_ID;
+    delete process.env.CLAUDE_MODEL;
+    const result = buildAuthoredBy();
+    expect(result.identity).toMatch(/^claude-code:\d{4}-\d{2}-\d{2}T/);
+    // Sanity: identity is never just the model name (CAIO cardinality rule).
+    expect(result.identity).not.toBe('claude-code');
+  });
+
+  it('treats empty-string CLAUDE_SESSION_ID as unset (falls back)', () => {
+    process.env.CLAUDE_SESSION_ID = '';
+    process.env.CLAUDE_MODEL = 'claude-opus-4';
+    const result = buildAuthoredBy();
+    expect(result.identity).toMatch(/^claude-opus-4:/);
   });
 });
