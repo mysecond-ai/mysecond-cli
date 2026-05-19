@@ -73,10 +73,27 @@ export interface ArtifactsResponse {
   synced: number;
 }
 
+// Customs v1: provenance attribution on synced context_files rows. Receiver
+// (mysecond-app /api/companion/files) persists this to the migration 058
+// `authored_by` jsonb column. CAIO cardinality rule: prefer the Claude
+// session id (`identity: <session-id>`); fall back to `${model}:${timestamp}`
+// when CLAUDE_SESSION_ID isn't exported into the hook env. NEVER bare model
+// name — model alone is low-cardinality and useless for attribution.
+export interface AuthoredBy {
+  kind: 'human' | 'ai' | 'services';
+  source?: string;
+  identity?: string;
+}
+
 export interface ContextFilePayload {
   file_path: string;
   content: string;
   current_hash: string;
+  // Optional. Only stamped on customs paths (.claude/skills/*,
+  // .claude/agents/*, .claude/workflows/*) today, where the receiver uses
+  // it to segment the pm_os.sync_origin_created funnel. Receiver
+  // normalizes unknown shapes to null.
+  authored_by?: AuthoredBy;
 }
 
 export interface ContextFilesResponse {
@@ -153,6 +170,52 @@ export function isContextFile(relativePath: string): boolean {
   }
 
   return true;
+}
+
+// Customs v1: classify a write event's file path as a customer-authored
+// skill / sub-agent / workflow artifact. These paths feed the Custom tab
+// in Companion's /customize/* surfaces; the receiver detects origin
+// ('created' | 'fork' | 'stock' | 'imported') from the slug + content hash.
+//
+// Matches:
+//   .claude/skills/<slug>/SKILL.md           (and supporting *.md in the same dir)
+//   .claude/agents/<name>.md                 (sub-agents live as flat files)
+//   .claude/workflows/<slug>/*.md            (workflow steps live nested)
+//
+// Same path-safety gate as isContextFile / classifyArtifactType (no leading
+// '/', no '..', case-insensitive prefix). Returns false for everything else
+// so the dispatcher falls through to classifyArtifactType for legacy paths.
+export function isCustomsArtifact(relativePath: string): boolean {
+  if (relativePath.startsWith('/') || relativePath.includes('..')) return false;
+  if (!relativePath.toLowerCase().endsWith('.md')) return false;
+  const lower = relativePath.toLowerCase();
+  // .claude/skills/<slug>/<file>.md — at least one segment under the slug dir.
+  if (/^\.claude\/skills\/[^/]+\/[^/]+\.md$/.test(lower)) return true;
+  // .claude/agents/<name>.md — flat under agents/.
+  if (/^\.claude\/agents\/[^/]+\.md$/.test(lower)) return true;
+  // .claude/workflows/<slug>/<file>.md — nested under workflow slug.
+  if (/^\.claude\/workflows\/[^/]+\/[^/]+\.md$/.test(lower)) return true;
+  return false;
+}
+
+// Build the AuthoredBy stamp for customs-artifact pushes. Reads from env
+// vars Claude Code exports into hook subprocesses. CAIO cardinality rule:
+//   - Prefer CLAUDE_SESSION_ID (high-cardinality, groups writes-per-session)
+//   - Fall back to `${model}:${ISO timestamp}` when session id missing
+//   - NEVER emit a bare model name (low cardinality, useless for attribution)
+//
+// Returns the same shape the receiver's normalizeAuthoredBy() expects.
+export function buildAuthoredBy(): AuthoredBy {
+  const sessionId = process.env.CLAUDE_SESSION_ID ?? '';
+  if (sessionId.length > 0) {
+    return { kind: 'ai', source: 'claude-code', identity: sessionId };
+  }
+  const model = process.env.CLAUDE_MODEL ?? 'claude-code';
+  return {
+    kind: 'ai',
+    source: 'claude-code',
+    identity: `${model}:${new Date().toISOString()}`,
+  };
 }
 
 // Classify a write event's file path into an artifact_type for PostToolUse.
