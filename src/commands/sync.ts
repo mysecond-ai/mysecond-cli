@@ -68,6 +68,11 @@ interface SyncSummary {
   baseAgentsUpdated: number;
   baseWorkflowsUpdated: number;
   baseSkippedDueToCustomization: number;
+  // The product-manager-os base SHA this project is now synced to. Surfaced
+  // so a customer/support can see which base a session is running — a cheap
+  // substitute for version pinning, and the signal for spotting a base-SHA
+  // shift mid-workflow. Null when the server didn't return one this round.
+  basePluginVersion: string | null;
 }
 
 function emptySummary(): SyncSummary {
@@ -91,6 +96,7 @@ function emptySummary(): SyncSummary {
     baseAgentsUpdated: 0,
     baseWorkflowsUpdated: 0,
     baseSkippedDueToCustomization: 0,
+    basePluginVersion: null,
   };
 }
 
@@ -301,8 +307,14 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
       if (summary.baseSkillsUpdated > 0) baseParts.push(`${summary.baseSkillsUpdated} skills`);
       if (summary.baseAgentsUpdated > 0) baseParts.push(`${summary.baseAgentsUpdated} agents`);
       if (summary.baseWorkflowsUpdated > 0) baseParts.push(`${summary.baseWorkflowsUpdated} workflows`);
+      // Tag the new base SHA — this is the signal for spotting a base-SHA
+      // shift between sessions (a multi-session workflow can otherwise observe
+      // steps written by different base versions with no way to tell).
+      const baseTag = summary.basePluginVersion
+        ? ` (base ${summary.basePluginVersion.slice(0, 7)})`
+        : '';
       out.write(
-        `mysecond: ${baseParts.join(', ')} updated — see https://app.mysecond.ai/changelog\n`,
+        `mysecond: ${baseParts.join(', ')} updated${baseTag} — see https://app.mysecond.ai/changelog\n`,
       );
     }
     return;
@@ -331,6 +343,10 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   if (parts.length === 0) parts.push('nothing changed');
 
   out.write(`✓ Sync complete: ${parts.join(', ')}.\n`);
+  if (summary.basePluginVersion) {
+    // Short SHA — which product-manager-os base this project is synced to.
+    out.write(`  Base plugin: ${summary.basePluginVersion.slice(0, 7)} (mysecond.ai)\n`);
+  }
   if (summary.conflictsCloudKept > 0 || summary.conflictsLocalKept > 0) {
     out.write(`  Recover backed-up versions from .claude/sync-conflicts/ if needed.\n`);
   }
@@ -524,6 +540,14 @@ export async function runSync(
   // file shape is stable.
   if (typeof response.base_plugin_version === 'string') {
     installState.base_plugin_version = response.base_plugin_version;
+    // Surface the base SHA in the sync summary (observability — Phase 7 of
+    // plan i-create-a-deeper-witty-dawn). Set ONLY from a SHA this response
+    // actually returned — never from the persisted installState value. On a
+    // server soft-fail (base files present, base_plugin_version null/absent)
+    // the persisted value is stale; tagging it would point at the wrong base
+    // for files just updated from an unknown newer one (codex review). When
+    // no SHA comes back, the summary simply omits the base tag.
+    summary.basePluginVersion = response.base_plugin_version;
   }
   if (
     skillsResult.updated > 0 ||
