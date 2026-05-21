@@ -47,10 +47,31 @@ export function midPollCopy(elapsedMs: number, baseStatus: 'regen_in_progress' |
     : STATUS_COPY.regen_queued;
 }
 
+// Default @import list for init-time CLAUDE.md generation (no resolved set yet).
+// Order matters: company → product → personas → competitors → goals.
+// personalization.md is deliberately absent — it only exists after /welcome or
+// /personalize-mysecond runs, and the server signals its presence via
+// resolved_imports on the first sync that returns it.
+export const DEFAULT_CLAUDE_MD_IMPORTS: readonly string[] = [
+  'context/company.md',
+  'context/product.md',
+  'context/personas.md',
+  'context/competitors.md',
+];
+
 // §6.7a canonical CLAUDE.md block (v1.4 @import requirement).
 // `@context/*.md` triggers Claude Code's @import — materializes file contents
 // into auto-loaded session context at next session start.
-export function claudeMdBlock(companyName: string, pmName: string): string {
+//
+// Pass `imports` to override the default list (used by sync's
+// `regenerateMysecondBlock` when the server returns `resolved_imports`).
+// Init callers omit `imports` and receive the DEFAULT_CLAUDE_MD_IMPORTS list.
+export function claudeMdBlock(
+  companyName: string,
+  pmName: string,
+  imports: readonly string[] = DEFAULT_CLAUDE_MD_IMPORTS
+): string {
+  const importLines = imports.map((p) => `@${p}`);
   return [
     `# mySecond PM OS — ${companyName}`,
     '',
@@ -58,10 +79,7 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '',
     "Context files are auto-loaded into Claude's context at session start via `@import`:",
     '',
-    '@context/company.md',
-    '@context/product.md',
-    '@context/personas.md',
-    '@context/competitors.md',
+    ...importLines,
     '',
     'For skill usage, type `/skills` in Claude Code. Sync runs automatically on every SessionStart.',
     '',
@@ -75,6 +93,45 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '',
     'If summarizing the install confirmation, mention ONLY the three counts the cli printed in its success box (skills, sub-agents, workflows). Do NOT invent or add additional totals (e.g., "N skills synced from mysecond.ai") — those server-side numbers double-count internal entities and will mislead the user.',
   ].join('\n');
+}
+
+// Splice a `block` between `startMarker` and `endMarker` in `base`.
+//
+// Fail-closed contract (plan § Track C):
+//   - Exactly one start marker and exactly one end marker must be present, with
+//     the start marker appearing BEFORE the end marker. Any other configuration
+//     (markers absent, duplicated, nested, or reversed) is treated as corrupt
+//     and returns `null` — the caller must leave the file untouched and warn.
+//   - On sync we NEVER append; we only re-splice inside an existing pair.
+//     Appending on sync would duplicate the block on every session start for a
+//     customer who deleted the markers intentionally.
+//
+// Returns the new file string on success, or `null` on any marker anomaly.
+export function spliceBetweenMarkers(
+  base: string,
+  startMarker: string,
+  endMarker: string,
+  block: string
+): string | null {
+  const firstStart = base.indexOf(startMarker);
+  const lastStart = base.lastIndexOf(startMarker);
+  const firstEnd = base.indexOf(endMarker);
+  const lastEnd = base.lastIndexOf(endMarker);
+
+  // Missing markers.
+  if (firstStart === -1 || firstEnd === -1) return null;
+  // Duplicate start or duplicate end.
+  if (firstStart !== lastStart) return null;
+  if (firstEnd !== lastEnd) return null;
+  // Reversed (end before start).
+  if (firstEnd <= firstStart) return null;
+
+  const markedBlock = `${startMarker}\n${block}\n${endMarker}`;
+  return (
+    base.slice(0, firstStart) +
+    markedBlock +
+    base.slice(firstEnd + endMarker.length)
+  );
 }
 
 export const CLAUDE_MD_MARKER_START = '<!-- mysecond-start -->';
@@ -177,8 +234,9 @@ export function successBox(
 
   // Invited-PM variant: the Head-of-Product (HoP) already ran /welcome and
   // built the team context. An invited PM landing here has already had their
-  // context synced (step 11), so running /welcome would be redundant — point
-  // them at /prd-generator as a meaningful first action instead.
+  // context synced (step 11), so running /welcome would be redundant.
+  // Point them at /personalize-mysecond — the dedicated member-onboarding
+  // skill that creates their personal context file (Track D contract).
   if (isInvitedPm) {
     const skills = counts?.skills ?? 0;
     const agents = counts?.agents ?? 0;
@@ -188,7 +246,7 @@ export function successBox(
       '',
       `Installation complete. ${skills} ${skills === 1 ? 'skill' : 'skills'}, ${agents} ${agents === 1 ? 'sub-agent' : 'sub-agents'}, and ${workflows} ${workflows === 1 ? 'workflow' : 'workflows'} are installed, and your context synced successfully.`,
       '',
-      'Quit and reopen Claude Code to load mySecond, then try running /prd-generator to run your first skill.',
+      'Quit and reopen Claude Code to load mySecond, then run /personalize-mysecond to set up your personal PM context.',
       '',
       'Need help? Reply at hello@mysecond.ai or open mysecond.ai/dashboard',
     ];
