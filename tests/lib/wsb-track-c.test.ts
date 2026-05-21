@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   claudeMdBlock,
   DEFAULT_CLAUDE_MD_IMPORTS,
+  PERSONALIZATION_PRECEDENCE_LINE,
   isValidImportPath,
   spliceBetweenMarkers,
   CLAUDE_MD_MARKER_START,
@@ -28,8 +29,8 @@ describe('claudeMdBlock: data-driven @import list', () => {
     for (const p of DEFAULT_CLAUDE_MD_IMPORTS) {
       expect(out).toContain(`@${p}`);
     }
-    // Should NOT contain personalization by default.
-    expect(out).not.toContain('personalization');
+    // Should NOT contain a personalization @import by default.
+    expect(out).not.toContain('@context/personalization');
   });
 
   it('renders a custom import list when passed', () => {
@@ -64,6 +65,17 @@ describe('claudeMdBlock: data-driven @import list', () => {
     const out = claudeMdBlock('MyCorp', 'Jane', ['context/company.md']);
     expect(out).toContain('# mySecond PM OS — MyCorp');
     expect(out).toContain('installed for Jane at MyCorp');
+  });
+
+  it('always includes the personalization precedence directive', () => {
+    // Default import list (no personalization file present).
+    expect(claudeMdBlock('Acme', 'Alice')).toContain(PERSONALIZATION_PRECEDENCE_LINE);
+    // And with a personalization import present.
+    const withPersonal = claudeMdBlock('Acme', 'Alice', [
+      'context/company.md',
+      'context/personalization.md',
+    ]);
+    expect(withPersonal).toContain(PERSONALIZATION_PRECEDENCE_LINE);
   });
 });
 

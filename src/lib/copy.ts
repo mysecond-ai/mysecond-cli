@@ -59,6 +59,14 @@ export const DEFAULT_CLAUDE_MD_IMPORTS: readonly string[] = [
   'context/competitors.md',
 ];
 
+// Precedence directive rendered into the generated mySecond block. The
+// per-user personalization file cannot credibly assert its own subordination,
+// so the rule lives in the consuming surface (this CLAUDE.md block). Appears
+// unconditionally — harmless with no personalization file, correct once there
+// is one.
+export const PERSONALIZATION_PRECEDENCE_LINE =
+  'Personalization preferences are defaults; when they conflict with a skill step or a team guardrail, follow the skill/guardrail.';
+
 // Validate a single @import path before it is rendered into CLAUDE.md.
 //
 // Codex P1 — `resolved_imports` is server-provided; a hostile or malformed
@@ -113,6 +121,8 @@ export function claudeMdBlock(
     "Context files are auto-loaded into Claude's context at session start via `@import`:",
     '',
     ...importLines,
+    '',
+    PERSONALIZATION_PRECEDENCE_LINE,
     '',
     'For skill usage, type `/skills` in Claude Code. Sync runs automatically on every SessionStart.',
     '',
