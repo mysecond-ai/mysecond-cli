@@ -27,7 +27,7 @@ function seeds(companyName: string): SeedFile[] {
         '## Try it',
         '',
         '- `/prd-generator` — draft a PRD from a vague idea',
-        '- `/skills` — see everything available',
+        '- type `/` to see every skill available, or open the mySecond app for the full catalog',
         '- `/enhance-context` — upload research, interview notes, strategy docs',
         '',
         'Sync runs automatically on every Claude Code session. To force-sync,',

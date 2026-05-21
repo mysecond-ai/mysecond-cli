@@ -124,7 +124,7 @@ export function claudeMdBlock(
     '',
     PERSONALIZATION_PRECEDENCE_LINE,
     '',
-    'For skill usage, type `/skills` in Claude Code. Sync runs automatically on every SessionStart.',
+    'To run a skill, type its name (e.g. `/prd-generator`); type `/` to see the menu of what is available, or open the mySecond app for the full catalog. Sync runs automatically on every SessionStart.',
     '',
     '## File-Write Rule (load-bearing — sync depends on it)',
     '',
