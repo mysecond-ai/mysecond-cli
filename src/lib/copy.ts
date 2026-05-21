@@ -59,6 +59,35 @@ export const DEFAULT_CLAUDE_MD_IMPORTS: readonly string[] = [
   'context/competitors.md',
 ];
 
+// Validate a single @import path before it is rendered into CLAUDE.md.
+//
+// Codex P1 — `resolved_imports` is server-provided; a hostile or malformed
+// entry could (a) inject newlines / extra instructions into CLAUDE.md, or
+// (b) point outside the project via `../` or an absolute path. An `@import`
+// path is rendered raw into CLAUDE.md, so it MUST be tightly constrained.
+//
+// Accepts ONLY: project-relative paths under `context/`, ending in `.md`,
+// with no control characters, no whitespace, no `..` traversal, no absolute
+// paths, no backslashes. Anything else is rejected and the caller drops it.
+export function isValidImportPath(p: unknown): p is string {
+  if (typeof p !== 'string') return false;
+  if (p.length === 0 || p.length > 512) return false;
+  // Reject control chars (incl. newlines, CR, tab, NUL, ESC) and all whitespace.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x20\x7F-\x9F]/.test(p)) return false;
+  // Reject absolute paths (POSIX `/`, Windows `C:\`) and backslashes.
+  if (p.startsWith('/') || p.includes('\\')) return false;
+  if (/^[A-Za-z]:/.test(p)) return false;
+  // Reject `..` traversal in any path segment.
+  if (p.split('/').some((seg) => seg === '..')) return false;
+  // Must be under context/ and end in .md.
+  if (!p.startsWith('context/')) return false;
+  if (!p.endsWith('.md')) return false;
+  // Reject `@` so an entry can't break out of the rendered `@import` line.
+  if (p.includes('@')) return false;
+  return true;
+}
+
 // §6.7a canonical CLAUDE.md block (v1.4 @import requirement).
 // `@context/*.md` triggers Claude Code's @import — materializes file contents
 // into auto-loaded session context at next session start.
@@ -66,12 +95,16 @@ export const DEFAULT_CLAUDE_MD_IMPORTS: readonly string[] = [
 // Pass `imports` to override the default list (used by sync's
 // `regenerateMysecondBlock` when the server returns `resolved_imports`).
 // Init callers omit `imports` and receive the DEFAULT_CLAUDE_MD_IMPORTS list.
+//
+// Codex P1: every import path is validated via `isValidImportPath` before
+// being rendered. Invalid entries are silently dropped here; callers that
+// want to warn should pre-filter with `isValidImportPath` and report.
 export function claudeMdBlock(
   companyName: string,
   pmName: string,
   imports: readonly string[] = DEFAULT_CLAUDE_MD_IMPORTS
 ): string {
-  const importLines = imports.map((p) => `@${p}`);
+  const importLines = imports.filter(isValidImportPath).map((p) => `@${p}`);
   return [
     `# mySecond PM OS — ${companyName}`,
     '',
@@ -95,6 +128,55 @@ export function claudeMdBlock(
   ].join('\n');
 }
 
+// Build a set of [start, end) character ranges that are inside fenced code
+// blocks (``` ... ``` — at least three backticks at the start of a line).
+// An unterminated fence extends to end-of-file. Used to ignore marker strings
+// that merely appear as documentation inside a code example.
+function fencedCodeRanges(base: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  // Match a fence line: optional leading whitespace, then >=3 backticks.
+  const fenceRe = /^[ \t]*`{3,}.*$/gm;
+  let openIdx: number | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRe.exec(base)) !== null) {
+    if (openIdx === null) {
+      openIdx = match.index;
+    } else {
+      // Close the fence — range covers the opening fence through the end of
+      // the closing fence line.
+      ranges.push([openIdx, match.index + match[0].length]);
+      openIdx = null;
+    }
+  }
+  // Unterminated fence — everything from the opener to EOF is "inside code".
+  if (openIdx !== null) {
+    ranges.push([openIdx, base.length]);
+  }
+  return ranges;
+}
+
+function isInsideRanges(idx: number, ranges: Array<[number, number]>): boolean {
+  return ranges.some(([start, end]) => idx >= start && idx < end);
+}
+
+// Find every occurrence of `marker` in `base` that is NOT inside a fenced
+// code block.
+function findMarkerIndices(
+  base: string,
+  marker: string,
+  fenced: Array<[number, number]>
+): number[] {
+  const indices: number[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = base.indexOf(marker, from);
+    if (idx === -1) break;
+    if (!isInsideRanges(idx, fenced)) indices.push(idx);
+    from = idx + marker.length;
+  }
+  return indices;
+}
+
 // Splice a `block` between `startMarker` and `endMarker` in `base`.
 //
 // Fail-closed contract (plan § Track C):
@@ -102,6 +184,10 @@ export function claudeMdBlock(
 //     the start marker appearing BEFORE the end marker. Any other configuration
 //     (markers absent, duplicated, nested, or reversed) is treated as corrupt
 //     and returns `null` — the caller must leave the file untouched and warn.
+//   - Codex P2: marker occurrences INSIDE a fenced code block (``` ... ```) are
+//     ignored — a CLAUDE.md that merely documents the markers in an example must
+//     not have its content overwritten. After filtering out fenced occurrences,
+//     the exactly-one-start-then-one-end rule still applies (fail closed).
 //   - On sync we NEVER append; we only re-splice inside an existing pair.
 //     Appending on sync would duplicate the block on every session start for a
 //     customer who deleted the markers intentionally.
@@ -113,17 +199,17 @@ export function spliceBetweenMarkers(
   endMarker: string,
   block: string
 ): string | null {
-  const firstStart = base.indexOf(startMarker);
-  const lastStart = base.lastIndexOf(startMarker);
-  const firstEnd = base.indexOf(endMarker);
-  const lastEnd = base.lastIndexOf(endMarker);
+  const fenced = fencedCodeRanges(base);
+  const startIndices = findMarkerIndices(base, startMarker, fenced);
+  const endIndices = findMarkerIndices(base, endMarker, fenced);
 
-  // Missing markers.
-  if (firstStart === -1 || firstEnd === -1) return null;
-  // Duplicate start or duplicate end.
-  if (firstStart !== lastStart) return null;
-  if (firstEnd !== lastEnd) return null;
-  // Reversed (end before start).
+  // Exactly one start and exactly one end (after ignoring fenced occurrences).
+  if (startIndices.length !== 1 || endIndices.length !== 1) return null;
+
+  const firstStart = startIndices[0]!;
+  const firstEnd = endIndices[0]!;
+
+  // Reversed (end before start) or overlapping.
   if (firstEnd <= firstStart) return null;
 
   const markedBlock = `${startMarker}\n${block}\n${endMarker}`;

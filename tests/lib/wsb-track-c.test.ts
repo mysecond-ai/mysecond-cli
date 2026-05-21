@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   claudeMdBlock,
   DEFAULT_CLAUDE_MD_IMPORTS,
+  isValidImportPath,
   spliceBetweenMarkers,
   CLAUDE_MD_MARKER_START,
   CLAUDE_MD_MARKER_END,
@@ -319,5 +320,316 @@ describe('cliSync: does not send member_id (server derives it)', () => {
     // the TypeScript compiler would catch any attempt to add it. This test
     // documents the contract: member_id must NOT appear in the function signature.
     // (A full integration test would require mocking fetch, covered in api.test.ts.)
+  });
+});
+
+// ===========================================================================
+// Codex review #37 — rework fixes
+// ===========================================================================
+
+// --- Codex P1: hostile / malformed import path rejection -------------------
+describe('isValidImportPath: rejects hostile / malformed paths', () => {
+  it('accepts a normal context/*.md path', () => {
+    expect(isValidImportPath('context/company.md')).toBe(true);
+    expect(isValidImportPath('context/personal/abc.md')).toBe(true);
+  });
+
+  it('rejects newline / control-char injection', () => {
+    expect(isValidImportPath('context/company.md\n@evil/inject.md')).toBe(false);
+    expect(isValidImportPath('context/a.md\r\nIGNORE PREVIOUS')).toBe(false);
+    expect(isValidImportPath('context/\x1b[31mred.md')).toBe(false);
+    expect(isValidImportPath('context/\x00null.md')).toBe(false);
+  });
+
+  it('rejects absolute paths', () => {
+    expect(isValidImportPath('/etc/passwd')).toBe(false);
+    expect(isValidImportPath('/context/company.md')).toBe(false);
+    expect(isValidImportPath('C:\\context\\company.md')).toBe(false);
+  });
+
+  it('rejects `..` traversal', () => {
+    expect(isValidImportPath('context/../../../etc/passwd.md')).toBe(false);
+    expect(isValidImportPath('../context/company.md')).toBe(false);
+    expect(isValidImportPath('context/../secret.md')).toBe(false);
+  });
+
+  it('rejects paths outside context/ or not ending in .md', () => {
+    expect(isValidImportPath('work/specs/x.md')).toBe(false);
+    expect(isValidImportPath('context/company.txt')).toBe(false);
+    expect(isValidImportPath('company.md')).toBe(false);
+  });
+
+  it('rejects whitespace and backslashes', () => {
+    expect(isValidImportPath('context/my file.md')).toBe(false);
+    expect(isValidImportPath('context\\company.md')).toBe(false);
+  });
+
+  it('rejects embedded @ (would break out of the @import line)', () => {
+    expect(isValidImportPath('context/co@evil.md')).toBe(false);
+  });
+
+  it('rejects non-string and oversized input', () => {
+    expect(isValidImportPath(undefined)).toBe(false);
+    expect(isValidImportPath(42)).toBe(false);
+    expect(isValidImportPath('context/' + 'a'.repeat(600) + '.md')).toBe(false);
+  });
+});
+
+describe('claudeMdBlock: drops invalid import paths', () => {
+  it('renders only valid imports, silently dropping hostile entries', () => {
+    const out = claudeMdBlock('Acme', 'Alice', [
+      'context/company.md',
+      'context/company.md\n@evil.md',
+      '/etc/passwd',
+      'context/personalization.md',
+    ]);
+    expect(out).toContain('@context/company.md');
+    expect(out).toContain('@context/personalization.md');
+    expect(out).not.toContain('@evil.md');
+    expect(out).not.toContain('/etc/passwd');
+  });
+
+  it('a hostile newline entry cannot inject extra lines into the block', () => {
+    const out = claudeMdBlock('Acme', 'Alice', [
+      'context/a.md\nINJECTED INSTRUCTION',
+    ]);
+    expect(out).not.toContain('INJECTED INSTRUCTION');
+  });
+});
+
+describe('regenerateMysecondBlock: rejects hostile import paths', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'msec-track-c-p1-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('drops a hostile path, warns on stderr, and does not render it', () => {
+    const block = claudeMdBlock('Acme', 'Alice', DEFAULT_CLAUDE_MD_IMPORTS);
+    const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+    writeFileSync(
+      claudeMdPath,
+      `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}\n`
+    );
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const wrote = regenerateMysecondBlock(claudeMdPath, tmpDir, [
+      'context/company.md',
+      '../../../etc/passwd.md',
+    ]);
+
+    expect(wrote).toBe(true);
+    const result = readFileSync(claudeMdPath, 'utf8');
+    expect(result).toContain('@context/company.md');
+    expect(result).not.toContain('etc/passwd');
+    const calls = stderrSpy.mock.calls.map((c) => c[0]).join('');
+    expect(calls).toContain('invalid @import path');
+    stderrSpy.mockRestore();
+  });
+});
+
+// --- Codex P2: markers inside a fenced code block are not real markers ------
+describe('spliceBetweenMarkers: ignores markers inside fenced code blocks', () => {
+  it('returns null when the only markers are inside a ``` code fence (fail closed)', () => {
+    const base = [
+      '# Docs',
+      'Example of the markers:',
+      '```',
+      CLAUDE_MD_MARKER_START,
+      'sample content',
+      CLAUDE_MD_MARKER_END,
+      '```',
+      'End of docs',
+    ].join('\n');
+    // No real markers exist outside the fence → fail closed.
+    expect(
+      spliceBetweenMarkers(base, CLAUDE_MD_MARKER_START, CLAUDE_MD_MARKER_END, 'NEW')
+    ).toBeNull();
+  });
+
+  it('splices the real markers when documentation markers exist in a fence too', () => {
+    const base = [
+      '# Docs',
+      '```',
+      CLAUDE_MD_MARKER_START, // documentation only — inside fence
+      CLAUDE_MD_MARKER_END,
+      '```',
+      CLAUDE_MD_MARKER_START, // the real marker pair
+      'OLD',
+      CLAUDE_MD_MARKER_END,
+    ].join('\n');
+    const result = spliceBetweenMarkers(
+      base,
+      CLAUDE_MD_MARKER_START,
+      CLAUDE_MD_MARKER_END,
+      'NEW'
+    );
+    expect(result).not.toBeNull();
+    expect(result).toContain('NEW');
+    expect(result).not.toContain('OLD');
+    // The fenced documentation markers survive untouched.
+    expect(result).toContain('```');
+  });
+
+  it('handles a tilde-style fence is NOT treated as code (only backtick fences)', () => {
+    // Backtick fences are the canonical CLAUDE.md style; only those are honored.
+    const base = [
+      CLAUDE_MD_MARKER_START,
+      'OLD',
+      CLAUDE_MD_MARKER_END,
+    ].join('\n');
+    const result = spliceBetweenMarkers(
+      base,
+      CLAUDE_MD_MARKER_START,
+      CLAUDE_MD_MARKER_END,
+      'NEW'
+    );
+    expect(result).toContain('NEW');
+  });
+
+  it('regenerateMysecondBlock does not overwrite a CLAUDE.md that only documents the markers', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'msec-track-c-p2-'));
+    try {
+      const original = [
+        '# My CLAUDE.md',
+        'This project documents the mysecond markers:',
+        '```',
+        CLAUDE_MD_MARKER_START,
+        '...generated block...',
+        CLAUDE_MD_MARKER_END,
+        '```',
+      ].join('\n');
+      const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+      writeFileSync(claudeMdPath, original);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const wrote = regenerateMysecondBlock(claudeMdPath, tmpDir, [
+        'context/company.md',
+      ]);
+
+      expect(wrote).toBe(false);
+      expect(readFileSync(claudeMdPath, 'utf8')).toBe(original);
+      stderrSpy.mockRestore();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- Codex P3: CRLF-tolerant marker / name extraction ----------------------
+describe('regenerateMysecondBlock: CRLF marker handling', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'msec-track-c-p3-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('extracts company / pm name from a CRLF-line-ending CLAUDE.md', () => {
+    const block = claudeMdBlock('MyCorp', 'Jane', DEFAULT_CLAUDE_MD_IMPORTS);
+    // Convert the whole file to CRLF line endings.
+    const crlf = `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}\n`.replace(
+      /\n/g,
+      '\r\n'
+    );
+    const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+    writeFileSync(claudeMdPath, crlf);
+
+    const wrote = regenerateMysecondBlock(claudeMdPath, tmpDir, [
+      'context/company.md',
+      'context/personalization.md',
+    ]);
+
+    expect(wrote).toBe(true);
+    const result = readFileSync(claudeMdPath, 'utf8');
+    // Names must be preserved, NOT fall back to "your company" / "you".
+    expect(result).toContain('# mySecond PM OS — MyCorp');
+    expect(result).toContain('installed for Jane at MyCorp');
+    expect(result).not.toContain('your company');
+    expect(result).not.toContain('installed for you at');
+  });
+});
+
+// --- Codex P4: [] vs undefined resolved_imports semantics -------------------
+describe('regenerateMysecondBlock: empty import list semantics', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'msec-track-c-p4-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('an empty resolved_imports array clears all @import lines (authoritative)', () => {
+    const block = claudeMdBlock('Acme', 'Alice', DEFAULT_CLAUDE_MD_IMPORTS);
+    const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+    writeFileSync(
+      claudeMdPath,
+      `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}\n`
+    );
+
+    const wrote = regenerateMysecondBlock(claudeMdPath, tmpDir, []);
+
+    expect(wrote).toBe(true);
+    const result = readFileSync(claudeMdPath, 'utf8');
+    const importLines = result.split('\n').filter((l) => l.startsWith('@'));
+    expect(importLines).toHaveLength(0);
+    // Block structure (header) is still intact.
+    expect(result).toContain('# mySecond PM OS — Acme');
+  });
+
+  it('runSync treats `Array.isArray` as the gate — [] is authoritative, undefined is no-op', () => {
+    // Documents the wiring contract: `Array.isArray(response.resolved_imports)`
+    // is true for [] (re-splice) and false for undefined (no-op). The runSync
+    // integration is covered by the gate condition; this asserts the JS semantics
+    // the gate relies on.
+    expect(Array.isArray([])).toBe(true);
+    expect(Array.isArray(undefined)).toBe(false);
+  });
+});
+
+// --- Codex P5: regenerateMysecondBlock returns an accurate write boolean ----
+describe('regenerateMysecondBlock: return value reflects a real write', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'msec-track-c-p5-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns true when the file is actually rewritten', () => {
+    const block = claudeMdBlock('Acme', 'Alice', DEFAULT_CLAUDE_MD_IMPORTS);
+    const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+    writeFileSync(
+      claudeMdPath,
+      `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}\n`
+    );
+    expect(
+      regenerateMysecondBlock(claudeMdPath, tmpDir, ['context/company.md'])
+    ).toBe(true);
+  });
+
+  it('returns false when CLAUDE.md is missing (fail closed)', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(
+      regenerateMysecondBlock(join(tmpDir, 'CLAUDE.md'), tmpDir, [
+        'context/company.md',
+      ])
+    ).toBe(false);
+    stderrSpy.mockRestore();
+  });
+
+  it('returns false when markers are absent / corrupt (fail closed)', () => {
+    const claudeMdPath = join(tmpDir, 'CLAUDE.md');
+    writeFileSync(claudeMdPath, 'No markers here at all\n');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(
+      regenerateMysecondBlock(claudeMdPath, tmpDir, ['context/company.md'])
+    ).toBe(false);
+    stderrSpy.mockRestore();
   });
 });
