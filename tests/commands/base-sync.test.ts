@@ -337,6 +337,40 @@ describe('Workstream H — base plugin update sync', () => {
     expect(out).toContain(`(base ${SHA_NEW.slice(0, 7)})`);
   });
 
+  it('omits the base SHA tag when the response returns no base_plugin_version (codex review)', async () => {
+    // Server soft-fail shape: base files present, base_plugin_version absent.
+    // The tag must NOT fall back to a stale persisted SHA — better no tag
+    // than a wrong one.
+    const root = tmpProject();
+    seedState(root);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        // base_plugin_version intentionally omitted
+        base_skills: [
+          {
+            file_path: '.claude/skills/prd-generator/SKILL.md',
+            content: '# PRD',
+            current_hash: shortHash('# PRD'),
+          },
+        ],
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await runSync([], ctx(root));
+    const out = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    expect(out).toMatch(/1 skills updated/);
+    expect(out).not.toContain('(base ');
+  });
+
   it('graceful initialization: no install-state.json yet → first sync writes it without crashing', async () => {
     const root = tmpProject();
     seedState(root);

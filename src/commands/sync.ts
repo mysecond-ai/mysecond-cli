@@ -540,11 +540,15 @@ export async function runSync(
   // file shape is stable.
   if (typeof response.base_plugin_version === 'string') {
     installState.base_plugin_version = response.base_plugin_version;
+    // Surface the base SHA in the sync summary (observability — Phase 7 of
+    // plan i-create-a-deeper-witty-dawn). Set ONLY from a SHA this response
+    // actually returned — never from the persisted installState value. On a
+    // server soft-fail (base files present, base_plugin_version null/absent)
+    // the persisted value is stale; tagging it would point at the wrong base
+    // for files just updated from an unknown newer one (codex review). When
+    // no SHA comes back, the summary simply omits the base tag.
+    summary.basePluginVersion = response.base_plugin_version;
   }
-  // Surface the base SHA in the sync summary (observability — Phase 7 of plan
-  // i-create-a-deeper-witty-dawn). Reflects the current synced base whether or
-  // not it advanced this round.
-  summary.basePluginVersion = installState.base_plugin_version;
   if (
     skillsResult.updated > 0 ||
     agentsResult.updated > 0 ||
