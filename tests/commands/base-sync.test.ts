@@ -306,6 +306,37 @@ describe('Workstream H — base plugin update sync', () => {
     expect(out).toContain('app.mysecond.ai/changelog');
   });
 
+  it('tags the base-update one-liner with the synced base SHA (Phase 7 observability)', async () => {
+    const root = tmpProject();
+    seedState(root);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        base_skills: [
+          {
+            file_path: '.claude/skills/prd-generator/SKILL.md',
+            content: '# PRD',
+            current_hash: shortHash('# PRD'),
+          },
+        ],
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await runSync([], ctx(root));
+    const out = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    writeSpy.mockRestore();
+
+    // Short SHA tag lets a customer/support spot a base-version shift.
+    expect(out).toContain(`(base ${SHA_NEW.slice(0, 7)})`);
+  });
+
   it('graceful initialization: no install-state.json yet → first sync writes it without crashing', async () => {
     const root = tmpProject();
     seedState(root);
