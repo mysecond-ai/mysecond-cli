@@ -2,6 +2,7 @@
 // push local artifacts back up. EDD §5.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   cliSync,
@@ -34,6 +35,13 @@ import {
   type CompanionFile,
   type ContextFile,
 } from '../lib/payload.js';
+import {
+  CLAUDE_MD_MARKER_END,
+  CLAUDE_MD_MARKER_START,
+  claudeMdBlock,
+  isValidImportPath,
+  spliceBetweenMarkers,
+} from '../lib/copy.js';
 import { pruneStalePlugins } from '../lib/prune-stale-plugins.js';
 import { readSyncState, writeSyncState, type SyncState } from '../lib/sync-state.js';
 
@@ -199,6 +207,123 @@ function syncBaseTree(
     else if (outcome === 'skipped-customized') skipped++;
   }
   return { updated, skipped };
+}
+
+// Extract companyName from the first line of the existing mySecond block.
+// Format: "# mySecond PM OS — <companyName>"
+// CRLF-tolerant: trailing \r / whitespace is trimmed before matching.
+// Returns null if the line is absent or doesn't match the expected pattern.
+function extractCompanyName(blockContent: string): string | null {
+  const firstLine = (blockContent.split('\n')[0] ?? '').replace(/\r$/, '');
+  const match = firstLine.match(/^# mySecond PM OS — (.+)$/);
+  return match?.[1]?.trim() ?? null;
+}
+
+// Extract pmName from the second non-empty paragraph of the existing mySecond block.
+// Format: "This workspace has a mySecond PM OS installed for <pmName> at <companyName>."
+// CRLF-tolerant: trailing \r is trimmed before matching.
+// Returns null if the line is absent or doesn't match.
+function extractPmName(blockContent: string): string | null {
+  for (const rawLine of blockContent.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    const match = line.match(/^This workspace has a mySecond PM OS installed for (.+?) at .+\.$/);
+    if (match?.[1]) return match[1].trim();
+  }
+  return null;
+}
+
+// Workstream B Phase 2, Track C: re-splice the mysecond block in CLAUDE.md
+// from `resolvedImports` whenever the server returns them.
+//
+// Fail-closed contract (delegates to spliceBetweenMarkers):
+//   - If the CLAUDE.md file is missing, no-op + warn (sync never creates on
+//     sync — only init writes it the first time).
+//   - If markers are absent, duplicated, nested, or reversed, leave the file
+//     untouched and warn. Never append on sync.
+//   - Codex P1: every import path is validated; hostile/malformed entries are
+//     dropped (with a warning) before rendering and before any disk check.
+//   - If we cannot read the existing company/PM names from the block, fall
+//     back to "your company"/"you" rather than failing.
+//
+// Returns `true` only when the file was actually rewritten; `false` on any
+// fail-closed path (missing file, corrupt markers). Codex P5 — the caller
+// uses this to set the "CLAUDE.md updated" summary flag accurately.
+export function regenerateMysecondBlock(
+  claudeMdPath: string,
+  rootDir: string,
+  resolvedImports: readonly string[]
+): boolean {
+  if (!existsSync(claudeMdPath)) {
+    process.stderr.write(
+      '[mysecond] CLAUDE.md not found — skipping mysecond-block regeneration. Re-run `mysecond init` to restore it.\n'
+    );
+    return false;
+  }
+
+  const base = readFileSync(claudeMdPath, 'utf8');
+
+  // Codex P1: validate every server-provided import path before it is
+  // rendered into CLAUDE.md or used in a filesystem lookup. Drop + warn on any
+  // entry that fails (control chars, traversal, absolute path, non-context,
+  // non-.md). A raw `@import` line is otherwise an injection vector.
+  const validImports: string[] = [];
+  for (const importPath of resolvedImports) {
+    if (isValidImportPath(importPath)) {
+      validImports.push(importPath);
+    } else {
+      process.stderr.write(
+        `[mysecond] Warning: ignoring invalid @import path from server: ${JSON.stringify(importPath)} — must be a project-relative context/*.md path.\n`
+      );
+    }
+  }
+
+  // Extract the existing block so we can read the company/pm names from it.
+  // CRLF-tolerant: the marker may be followed by \r\n or trailing whitespace.
+  const startIdx = base.indexOf(CLAUDE_MD_MARKER_START);
+  const endIdx = base.indexOf(CLAUDE_MD_MARKER_END);
+  let companyName = 'your company';
+  let pmName = 'you';
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    // Slice from just after the start marker; extractCompanyName/extractPmName
+    // each trim trailing \r per line, so a \r\n or trailing-space after the
+    // marker no longer breaks extraction.
+    const existingBlock = base.slice(
+      startIdx + CLAUDE_MD_MARKER_START.length,
+      endIdx
+    );
+    companyName = extractCompanyName(existingBlock.replace(/^[ \t\r]*\n/, '')) ?? companyName;
+    pmName = extractPmName(existingBlock) ?? pmName;
+  }
+
+  const newBlock = claudeMdBlock(companyName, pmName, validImports);
+  const spliced = spliceBetweenMarkers(
+    base,
+    CLAUDE_MD_MARKER_START,
+    CLAUDE_MD_MARKER_END,
+    newBlock
+  );
+
+  if (spliced === null) {
+    process.stderr.write(
+      '[mysecond] CLAUDE.md mysecond markers are missing, duplicated, or reversed — skipping regeneration to avoid corrupting the file. Re-run `mysecond init` to restore them.\n'
+    );
+    return false;
+  }
+
+  writeFileSync(claudeMdPath, spliced);
+
+  // Warn for any (already-validated) @import target that doesn't exist on
+  // disk. A broken @import is silent — the user just sees a generic agent
+  // instead of their context.
+  for (const importPath of validImports) {
+    const fullPath = join(rootDir, importPath);
+    if (!existsSync(fullPath)) {
+      process.stderr.write(
+        `[mysecond] Warning: @import target not found on disk: ${importPath} — sync the project to download the missing file.\n`
+      );
+    }
+  }
+  return true;
 }
 
 function mergeClaudeMdOverride(claudeMdPath: string, override: string): void {
@@ -567,6 +692,27 @@ export async function runSync(
   if (claudeMdOverride) {
     mergeClaudeMdOverride(paths.claudeMdPath, claudeMdOverride);
     summary.claudeMdUpdated = true;
+  }
+
+  // Workstream B Phase 2, Track C: re-generate the mysecond block from the
+  // server-provided resolved_imports list. This ensures every sync reflects
+  // the user's actual per-user file set (team-shared + products + personal).
+  //
+  // Codex P4 — semantics:
+  //   - `undefined` (field absent: older server / legacy API key with no
+  //     member identity) → no-op, block left as-is.
+  //   - an actual array, INCLUDING `[]`, is authoritative → re-splice with
+  //     exactly those imports. An empty array clears stale imports rather than
+  //     being silently skipped.
+  // Codex P5 — only flag "CLAUDE.md updated" when regenerateMysecondBlock
+  // reports a real write (it fails closed on missing file / corrupt markers).
+  if (Array.isArray(response.resolved_imports)) {
+    const wrote = regenerateMysecondBlock(
+      paths.claudeMdPath,
+      ctx.rootDir,
+      response.resolved_imports
+    );
+    if (wrote) summary.claudeMdUpdated = true;
   }
 
   // Up-sync is best-effort: failure here doesn't fail the sync command. In

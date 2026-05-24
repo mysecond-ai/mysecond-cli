@@ -143,13 +143,14 @@ describe('successBox: red-team — malicious / missing names', () => {
 });
 
 // v1.4.8 — invited-PM variant. HoP already ran /welcome on team's behalf, so
-// the invited PM should be pointed at /prd-generator as a first action rather
-// than told to redo /welcome.
+// the invited PM should be pointed at /personalize-mysecond (Workstream B Track C
+// update: was /prd-generator, now points to the dedicated member-onboarding skill).
 describe('successBox: invited-PM variant (v1.4.8)', () => {
-  it('directs invited PM to /prd-generator (not /welcome)', () => {
+  it('directs invited PM to /personalize-mysecond (not /welcome, not /prd-generator)', () => {
     const out = successBox('Bob', 'Acme', { skills: 91, agents: 6, workflows: 4 }, true);
-    expect(out).toContain('/prd-generator');
+    expect(out).toContain('/personalize-mysecond');
     expect(out).not.toContain('/welcome');
+    expect(out).not.toContain('/prd-generator');
   });
 
   it('mentions installed counts and synced context', () => {

@@ -11,7 +11,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 
 import { atomicWriteFile } from '../atomic-write.js';
-import { CLAUDE_MD_MARKER_END, CLAUDE_MD_MARKER_START, claudeMdBlock } from '../copy.js';
+import {
+  CLAUDE_MD_MARKER_END,
+  CLAUDE_MD_MARKER_START,
+  DEFAULT_CLAUDE_MD_IMPORTS,
+  claudeMdBlock,
+  spliceBetweenMarkers,
+} from '../copy.js';
 import { projectPaths } from '../files.js';
 
 import type { StepFn } from './types.js';
@@ -23,7 +29,10 @@ export const step7: StepFn = async ({ ctx, shared }) => {
   // customer's CLAUDE.md, persisted across every session.
   const companyName = shared.companyName ?? 'your company';
   const pmName = shared.pmName ?? 'you';
-  const block = claudeMdBlock(companyName, pmName);
+  // Init always uses the default import list — no resolved set exists yet.
+  // sync.ts's regenerateMysecondBlock uses the server-provided resolved_imports
+  // list after first sync.
+  const block = claudeMdBlock(companyName, pmName, DEFAULT_CLAUDE_MD_IMPORTS);
   const markedBlock = `${CLAUDE_MD_MARKER_START}\n${block}\n${CLAUDE_MD_MARKER_END}`;
 
   if (!existsSync(claudeMdPath)) {
@@ -33,21 +42,22 @@ export const step7: StepFn = async ({ ctx, shared }) => {
   }
 
   const base = readFileSync(claudeMdPath, 'utf8');
-  const startIdx = base.indexOf(CLAUDE_MD_MARKER_START);
-  const endIdx = base.indexOf(CLAUDE_MD_MARKER_END);
 
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    // Branch (b): replace content between markers (preserves customer's
-    // surrounding CLAUDE.md edits).
-    const next =
-      base.slice(0, startIdx) +
-      markedBlock +
-      base.slice(endIdx + CLAUDE_MD_MARKER_END.length);
-    atomicWriteFile(claudeMdPath, next);
+  // Branch (b): markers present — use the shared spliceBetweenMarkers helper.
+  // This is the same helper sync.ts uses, guaranteeing consistent fail-closed
+  // behavior across both the init and sync paths.
+  const spliced = spliceBetweenMarkers(
+    base,
+    CLAUDE_MD_MARKER_START,
+    CLAUDE_MD_MARKER_END,
+    block
+  );
+  if (spliced !== null) {
+    atomicWriteFile(claudeMdPath, spliced);
     return { step: 7, outcome: { kind: 'completed' } };
   }
 
-  // Branch (c): no marker — append at end.
+  // Branch (c): no valid marker pair — append at end.
   // RT-4: ensure file ends with exactly one \n before payload.
   const trailingNewline = base.endsWith('\n') ? '' : '\n';
   const next = `${base}${trailingNewline}\n${markedBlock}\n`;

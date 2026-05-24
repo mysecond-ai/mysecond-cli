@@ -57,6 +57,11 @@ export interface CliSyncResponse {
   // it's GET, but server may echo for debugging).
   workspace_scope?: 'solo' | 'team';
   customer_id?: string;
+  // Workstream B Phase 2: per-user ordered list of on-disk @import paths for
+  // this member's CLAUDE.md block (team-shared + product + personal, personal
+  // last). Absent when the server predates Track B or for legacy API keys with
+  // no member identity — sync degrades gracefully to leaving the block as-is.
+  resolved_imports?: string[];
 }
 
 export interface ArtifactPayload {

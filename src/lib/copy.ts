@@ -47,10 +47,72 @@ export function midPollCopy(elapsedMs: number, baseStatus: 'regen_in_progress' |
     : STATUS_COPY.regen_queued;
 }
 
+// Default @import list for init-time CLAUDE.md generation (no resolved set yet).
+// Order matters: company → product → personas → competitors → goals.
+// personalization.md is deliberately absent — it only exists after /welcome or
+// /personalize-mysecond runs, and the server signals its presence via
+// resolved_imports on the first sync that returns it.
+export const DEFAULT_CLAUDE_MD_IMPORTS: readonly string[] = [
+  'context/company.md',
+  'context/product.md',
+  'context/personas.md',
+  'context/competitors.md',
+];
+
+// Precedence directive rendered into the generated mySecond block. The
+// per-user personalization file cannot credibly assert its own subordination,
+// so the rule lives in the consuming surface (this CLAUDE.md block). Appears
+// unconditionally — harmless with no personalization file, correct once there
+// is one.
+export const PERSONALIZATION_PRECEDENCE_LINE =
+  'Personalization preferences are defaults; when they conflict with a skill step or a team guardrail, follow the skill/guardrail.';
+
+// Validate a single @import path before it is rendered into CLAUDE.md.
+//
+// Codex P1 — `resolved_imports` is server-provided; a hostile or malformed
+// entry could (a) inject newlines / extra instructions into CLAUDE.md, or
+// (b) point outside the project via `../` or an absolute path. An `@import`
+// path is rendered raw into CLAUDE.md, so it MUST be tightly constrained.
+//
+// Accepts ONLY: project-relative paths under `context/`, ending in `.md`,
+// with no control characters, no whitespace, no `..` traversal, no absolute
+// paths, no backslashes. Anything else is rejected and the caller drops it.
+export function isValidImportPath(p: unknown): p is string {
+  if (typeof p !== 'string') return false;
+  if (p.length === 0 || p.length > 512) return false;
+  // Reject control chars (incl. newlines, CR, tab, NUL, ESC) and all whitespace.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x20\x7F-\x9F]/.test(p)) return false;
+  // Reject absolute paths (POSIX `/`, Windows `C:\`) and backslashes.
+  if (p.startsWith('/') || p.includes('\\')) return false;
+  if (/^[A-Za-z]:/.test(p)) return false;
+  // Reject `..` traversal in any path segment.
+  if (p.split('/').some((seg) => seg === '..')) return false;
+  // Must be under context/ and end in .md.
+  if (!p.startsWith('context/')) return false;
+  if (!p.endsWith('.md')) return false;
+  // Reject `@` so an entry can't break out of the rendered `@import` line.
+  if (p.includes('@')) return false;
+  return true;
+}
+
 // §6.7a canonical CLAUDE.md block (v1.4 @import requirement).
 // `@context/*.md` triggers Claude Code's @import — materializes file contents
 // into auto-loaded session context at next session start.
-export function claudeMdBlock(companyName: string, pmName: string): string {
+//
+// Pass `imports` to override the default list (used by sync's
+// `regenerateMysecondBlock` when the server returns `resolved_imports`).
+// Init callers omit `imports` and receive the DEFAULT_CLAUDE_MD_IMPORTS list.
+//
+// Codex P1: every import path is validated via `isValidImportPath` before
+// being rendered. Invalid entries are silently dropped here; callers that
+// want to warn should pre-filter with `isValidImportPath` and report.
+export function claudeMdBlock(
+  companyName: string,
+  pmName: string,
+  imports: readonly string[] = DEFAULT_CLAUDE_MD_IMPORTS
+): string {
+  const importLines = imports.filter(isValidImportPath).map((p) => `@${p}`);
   return [
     `# mySecond PM OS — ${companyName}`,
     '',
@@ -58,12 +120,11 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '',
     "Context files are auto-loaded into Claude's context at session start via `@import`:",
     '',
-    '@context/company.md',
-    '@context/product.md',
-    '@context/personas.md',
-    '@context/competitors.md',
+    ...importLines,
     '',
-    'For skill usage, type `/skills` in Claude Code. Sync runs automatically on every SessionStart.',
+    PERSONALIZATION_PRECEDENCE_LINE,
+    '',
+    'To run a skill, type its name (e.g. `/prd-generator`); type `/` to see the menu of what is available, or open the mySecond app for the full catalog. Sync runs automatically on every SessionStart.',
     '',
     '## File-Write Rule (load-bearing — sync depends on it)',
     '',
@@ -75,6 +136,98 @@ export function claudeMdBlock(companyName: string, pmName: string): string {
     '',
     'If summarizing the install confirmation, mention ONLY the three counts the cli printed in its success box (skills, sub-agents, workflows). Do NOT invent or add additional totals (e.g., "N skills synced from mysecond.ai") — those server-side numbers double-count internal entities and will mislead the user.',
   ].join('\n');
+}
+
+// Build a set of [start, end) character ranges that are inside fenced code
+// blocks (``` ... ``` — at least three backticks at the start of a line).
+// An unterminated fence extends to end-of-file. Used to ignore marker strings
+// that merely appear as documentation inside a code example.
+function fencedCodeRanges(base: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  // Match a fence line: optional leading whitespace, then >=3 backticks.
+  const fenceRe = /^[ \t]*`{3,}.*$/gm;
+  let openIdx: number | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRe.exec(base)) !== null) {
+    if (openIdx === null) {
+      openIdx = match.index;
+    } else {
+      // Close the fence — range covers the opening fence through the end of
+      // the closing fence line.
+      ranges.push([openIdx, match.index + match[0].length]);
+      openIdx = null;
+    }
+  }
+  // Unterminated fence — everything from the opener to EOF is "inside code".
+  if (openIdx !== null) {
+    ranges.push([openIdx, base.length]);
+  }
+  return ranges;
+}
+
+function isInsideRanges(idx: number, ranges: Array<[number, number]>): boolean {
+  return ranges.some(([start, end]) => idx >= start && idx < end);
+}
+
+// Find every occurrence of `marker` in `base` that is NOT inside a fenced
+// code block.
+function findMarkerIndices(
+  base: string,
+  marker: string,
+  fenced: Array<[number, number]>
+): number[] {
+  const indices: number[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = base.indexOf(marker, from);
+    if (idx === -1) break;
+    if (!isInsideRanges(idx, fenced)) indices.push(idx);
+    from = idx + marker.length;
+  }
+  return indices;
+}
+
+// Splice a `block` between `startMarker` and `endMarker` in `base`.
+//
+// Fail-closed contract (plan § Track C):
+//   - Exactly one start marker and exactly one end marker must be present, with
+//     the start marker appearing BEFORE the end marker. Any other configuration
+//     (markers absent, duplicated, nested, or reversed) is treated as corrupt
+//     and returns `null` — the caller must leave the file untouched and warn.
+//   - Codex P2: marker occurrences INSIDE a fenced code block (``` ... ```) are
+//     ignored — a CLAUDE.md that merely documents the markers in an example must
+//     not have its content overwritten. After filtering out fenced occurrences,
+//     the exactly-one-start-then-one-end rule still applies (fail closed).
+//   - On sync we NEVER append; we only re-splice inside an existing pair.
+//     Appending on sync would duplicate the block on every session start for a
+//     customer who deleted the markers intentionally.
+//
+// Returns the new file string on success, or `null` on any marker anomaly.
+export function spliceBetweenMarkers(
+  base: string,
+  startMarker: string,
+  endMarker: string,
+  block: string
+): string | null {
+  const fenced = fencedCodeRanges(base);
+  const startIndices = findMarkerIndices(base, startMarker, fenced);
+  const endIndices = findMarkerIndices(base, endMarker, fenced);
+
+  // Exactly one start and exactly one end (after ignoring fenced occurrences).
+  if (startIndices.length !== 1 || endIndices.length !== 1) return null;
+
+  const firstStart = startIndices[0]!;
+  const firstEnd = endIndices[0]!;
+
+  // Reversed (end before start) or overlapping.
+  if (firstEnd <= firstStart) return null;
+
+  const markedBlock = `${startMarker}\n${block}\n${endMarker}`;
+  return (
+    base.slice(0, firstStart) +
+    markedBlock +
+    base.slice(firstEnd + endMarker.length)
+  );
 }
 
 export const CLAUDE_MD_MARKER_START = '<!-- mysecond-start -->';
@@ -177,8 +330,9 @@ export function successBox(
 
   // Invited-PM variant: the Head-of-Product (HoP) already ran /welcome and
   // built the team context. An invited PM landing here has already had their
-  // context synced (step 11), so running /welcome would be redundant — point
-  // them at /prd-generator as a meaningful first action instead.
+  // context synced (step 11), so running /welcome would be redundant.
+  // Point them at /personalize-mysecond — the dedicated member-onboarding
+  // skill that creates their personal context file (Track D contract).
   if (isInvitedPm) {
     const skills = counts?.skills ?? 0;
     const agents = counts?.agents ?? 0;
@@ -188,7 +342,7 @@ export function successBox(
       '',
       `Installation complete. ${skills} ${skills === 1 ? 'skill' : 'skills'}, ${agents} ${agents === 1 ? 'sub-agent' : 'sub-agents'}, and ${workflows} ${workflows === 1 ? 'workflow' : 'workflows'} are installed, and your context synced successfully.`,
       '',
-      'Quit and reopen Claude Code to load mySecond, then try running /prd-generator to run your first skill.',
+      'Quit and reopen Claude Code to load mySecond, then run /personalize-mysecond to set up your personal PM context.',
       '',
       'Need help? Reply at hello@mysecond.ai or open mysecond.ai/dashboard',
     ];
