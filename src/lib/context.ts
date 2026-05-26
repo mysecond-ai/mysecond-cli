@@ -124,34 +124,12 @@ function loadDotenv(rootDir: string): void {
   }
 }
 
-// v1.4.4 — extract the bare token (and paired API URL, if present)
-// from whatever keychain.ts fileGet returned. Two formats live at the
-// same project-scoped path:
-//   1. Bare token (setDeviceToken writes `<token>\n` — current path).
-//   2. Dotenv-style (step-5b writes `COMPANION_API_KEY=<token>\n
-//      COMPANION_API_URL=<url>\n` — legacy path for pre-1.4.2 installs
-//      whose device-code flow never completed).
-// The paired URL matters for staging installs whose COMPANION_API_URL
-// only lives in the project-scoped credentials file (step-5b moved it
-// out of .env). Without recovering it here, a rescued msd_ token would
-// be sent to the production host and 401 anyway. Codex P2 follow-up.
-function normalizeStoredTokenValue(raw: string): { token: string; apiUrl: string | null } {
-  // Bare-token shortcut: no newline AND no equals → return as-is.
-  if (!raw.includes('\n') && !raw.includes('=')) {
-    return { token: raw, apiUrl: null };
-  }
-  let token = raw;
-  let apiUrl: string | null = null;
-  const tokenMatch = raw.match(/^COMPANION_API_KEY=(.+)$/m);
-  if (tokenMatch !== null && tokenMatch[1] !== undefined) {
-    token = tokenMatch[1].trim();
-  }
-  const urlMatch = raw.match(/^COMPANION_API_URL=(.+)$/m);
-  if (urlMatch !== null && urlMatch[1] !== undefined) {
-    apiUrl = urlMatch[1].trim();
-  }
-  return { token, apiUrl };
-}
+// Item 2 (2026-05-25): credential-format normalization moved into
+// `getDeviceToken` in keychain.ts so every caller — not just buildContext —
+// gets a clean token. The shape returned by `getDeviceToken` now exposes
+// `{ token, storage, apiUrl }`; `apiUrl` is non-null when the underlying
+// store held step-5b dotenv-style content. buildContext consumes that
+// shape directly below; no local normalization needed.
 
 // v1.4.4 legacy-key warning state. Module-scoped so a single process only
 // emits the marker + prose once even if buildContext is called twice.
@@ -230,18 +208,23 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   let keychainRescue = false;
 
   // Lazy keychain lookup — memoized so the rescue check and the
-  // empty-credential fallback share a single shell-out.
-  let keychainTokenCache: string | null | undefined = undefined;
-  const loadKeychainToken = (): string | null => {
-    if (keychainTokenCache !== undefined) return keychainTokenCache;
+  // empty-credential fallback share a single shell-out. Normalization
+  // happens inside getDeviceToken (Item 2): the returned shape already
+  // exposes `{ token, apiUrl }`, so buildContext just consumes both.
+  let keychainCache: { token: string; apiUrl: string | null } | null | undefined = undefined;
+  const loadKeychain = (): { token: string; apiUrl: string | null } | null => {
+    if (keychainCache !== undefined) return keychainCache;
     try {
       const fromStorage = getDeviceToken(rootDir);
-      keychainTokenCache = fromStorage !== null ? fromStorage.token : null;
+      keychainCache =
+        fromStorage !== null
+          ? { token: fromStorage.token, apiUrl: fromStorage.apiUrl }
+          : null;
     } catch {
       // Best-effort. If keychain lookup throws, treat as absent.
-      keychainTokenCache = null;
+      keychainCache = null;
     }
-    return keychainTokenCache;
+    return keychainCache;
   };
 
   if (flags.apiKey !== null && flags.apiKey.length > 0) {
@@ -255,18 +238,9 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     // token, prefer it; the warning shifts to "your env is stale, unset
     // it to silence." Caught by codex review on v1.4.4 PR #28.
     if (!apiKey.startsWith('msd_')) {
-      const fromKeychain = loadKeychainToken();
-      // Normalize: keychain.ts's fileGet returns the raw file contents.
-      // setDeviceToken writes bare `<token>\n`, but step-5b legacy writes
-      // dotenv-style `COMPANION_API_KEY=<token>\nCOMPANION_API_URL=...`
-      // to the SAME path. Without parsing the latter, file-fallback users
-      // whose first init never completed device-code stay stuck in a
-      // re-auth loop even though a valid msd_ token exists on disk.
-      // Codex P2 follow-up on PR #28.
-      const normalized =
-        fromKeychain !== null ? normalizeStoredTokenValue(fromKeychain) : null;
-      if (normalized !== null && normalized.token.startsWith('msd_')) {
-        apiKey = normalized.token;
+      const fromKeychain = loadKeychain();
+      if (fromKeychain !== null && fromKeychain.token.startsWith('msd_')) {
+        apiKey = fromKeychain.token;
         apiKeySource = 'keychain';
         keychainRescue = true;
         // Recover the paired COMPANION_API_URL when shell env didn't
@@ -275,26 +249,19 @@ export function buildContext(flags: ParsedFlags): CommandContext {
         // would send the rescued msd_ token to the production host and
         // 401 anyway. Shell env wins if both are set — explicit user
         // override of staging targeting stays intact.
-        if (!apiBaseFromEnv && normalized.apiUrl !== null) {
-          apiBase = normalized.apiUrl;
+        if (!apiBaseFromEnv && fromKeychain.apiUrl !== null) {
+          apiBase = fromKeychain.apiUrl;
         }
       }
     }
   }
   if (apiKey.length === 0) {
-    const fromKeychain = loadKeychainToken();
+    const fromKeychain = loadKeychain();
     if (fromKeychain !== null) {
-      // Normalize the stored value here too, for symmetry with the
-      // rescue branch above. Without this, a customer who follows the
-      // rescue warning and unsets COMPANION_API_KEY would fall into this
-      // branch, get the raw step-5b dotenv blob assigned to ctx.apiKey,
-      // and end up sending a malformed bearer to /whoami. Codex pass-4
-      // P2 — the rescue advice itself was breaking the next-run path.
-      const normalized = normalizeStoredTokenValue(fromKeychain);
-      apiKey = normalized.token;
+      apiKey = fromKeychain.token;
       apiKeySource = 'keychain';
-      if (!apiBaseFromEnv && normalized.apiUrl !== null) {
-        apiBase = normalized.apiUrl;
+      if (!apiBaseFromEnv && fromKeychain.apiUrl !== null) {
+        apiBase = fromKeychain.apiUrl;
       }
     }
   }
