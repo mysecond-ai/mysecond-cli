@@ -35,8 +35,97 @@ import { projectHash } from './project-hash.js';
 export type TokenStorage = 'keychain' | 'file_fallback';
 
 export interface ReadResult {
+  /** Normalized bare token, safe to paste into a Bearer header. */
   token: string;
   storage: TokenStorage;
+  /**
+   * Paired `COMPANION_API_URL` when the stored credential was written by
+   * step-5b in dotenv format. `null` for bare-token stores (the v1.4.0+
+   * path written by `setDeviceToken`). Surfaced so `buildContext` can
+   * recover the URL during legacy-credential rescue without re-parsing.
+   */
+  apiUrl: string | null;
+}
+
+/**
+ * Two formats live at the same project-scoped credentials path:
+ *   1. Bare token — `setDeviceToken` writes `<token>\n` (v1.4.0+ canonical).
+ *   2. step-5b exact dotenv format —
+ *      `COMPANION_API_KEY=<token>\nCOMPANION_API_URL=<url>\n` (legacy /
+ *      installed-base recovery path). step-5b writes this exact shape;
+ *      we do not aspire to be a general dotenv parser.
+ *
+ * Item 2 (2026-05-25): `getDeviceToken` previously returned the raw blob.
+ * Callers that pasted `ReadResult.token` into a Bearer header (notably
+ * `mysecond doctor`) hit `Headers.append: invalid header value` because of
+ * the embedded newline. Normalization now happens inside `getDeviceToken`
+ * so every caller is regression-proof by construction.
+ *
+ * Hardening (post-review, 2026-05-25):
+ *   - Always trim the returned token. `fileGet`/`macosKeychainGet` both
+ *     trim their output today, but the normalizer should not depend on
+ *     that — a future input source (libsecret, Windows credential mgr)
+ *     might not.
+ *   - If input looks structured (contains `\n` or `=`) but no
+ *     `COMPANION_API_KEY=` line matches, treat as unparseable and return
+ *     an empty token. The caller (`getDeviceToken`) converts that to
+ *     `null`, so downstream sees "no credential" rather than a malformed
+ *     bearer. This catches: empty-value `COMPANION_API_KEY=` lines,
+ *     `export`-prefixed keys, spaces around `=`, and any future drift in
+ *     step-5b's write format.
+ *   - Final post-check: if the returned token still contains any
+ *     control char that `Headers.append` rejects (CR/LF), reject it.
+ *     Defense in depth.
+ *
+ * Exported as `_normalizeStoredCredentialForTests` so the unit suite can
+ * cover CRLF and malformed-format inputs without filesystem fixtures.
+ */
+export function _normalizeStoredCredentialForTests(
+  raw: string
+): { token: string; apiUrl: string | null } {
+  return normalizeStoredCredential(raw);
+}
+
+function normalizeStoredCredential(raw: string): { token: string; apiUrl: string | null } {
+  // Bare-token shortcut: trim leading/trailing whitespace (including CR,
+  // LF, tabs) and check whether anything structured remains. The
+  // canonical `setDeviceToken` write format is `<token>\n` — after trim
+  // that becomes a clean bare token.
+  const trimmed = raw.trim();
+  if (!trimmed.includes('\n') && !trimmed.includes('=')) {
+    return { token: containsCtl(trimmed) ? '' : trimmed, apiUrl: null };
+  }
+
+  // step-5b exact format: `^COMPANION_API_KEY=<value>$` at column 0.
+  // `.+` requires at least one character so empty-value lines miss the
+  // match and fall through to the "unparseable structured input" branch
+  // below — safer than returning an empty token tied to a recovered URL.
+  let apiUrl: string | null = null;
+  const tokenMatch = raw.match(/^COMPANION_API_KEY=(.+)$/m);
+  const urlMatch = raw.match(/^COMPANION_API_URL=(.+)$/m);
+  if (urlMatch !== null && urlMatch[1] !== undefined) {
+    apiUrl = urlMatch[1].trim();
+  }
+
+  if (tokenMatch !== null && tokenMatch[1] !== undefined) {
+    const token = tokenMatch[1].trim();
+    return { token: containsCtl(token) ? '' : token, apiUrl };
+  }
+
+  // Structured input (has `\n` or `=` after trim) but no
+  // `COMPANION_API_KEY=` match. Reject the entire credential — returning
+  // the raw blob would put a multi-line string into someone's Bearer
+  // header. Caller treats empty token as "no credential found" and
+  // prompts re-auth.
+  return { token: '', apiUrl: null };
+}
+
+/** True if `s` contains any character that `Headers.append` would reject. */
+function containsCtl(s: string): boolean {
+  // Headers.append rejects CR, LF, NUL, and anything outside ISO-8859-1.
+  // We only need to guard the cases the credential store has ever
+  // produced — CR/LF — but checking the full set is cheap.
+  return /[\r\n\0]/.test(s);
 }
 
 /**
@@ -244,13 +333,21 @@ export function getDeviceToken(absoluteProjectDir: string): ReadResult | null {
     const account = accountFor(absoluteProjectDir);
     const fromKeychain = macosKeychainGet(account);
     if (fromKeychain !== null) {
-      return { token: fromKeychain, storage: 'keychain' };
+      const { token, apiUrl } = normalizeStoredCredential(fromKeychain);
+      // Empty token => normalizer rejected the stored value (malformed
+      // structured input, or hit the control-char post-check). Treat as
+      // "no credential" so downstream prompts re-auth instead of
+      // pasting a bad bearer.
+      if (token.length === 0) return null;
+      return { token, storage: 'keychain', apiUrl };
     }
   }
 
   const fromFile = fileGet(absoluteProjectDir);
   if (fromFile !== null) {
-    return { token: fromFile, storage: 'file_fallback' };
+    const { token, apiUrl } = normalizeStoredCredential(fromFile);
+    if (token.length === 0) return null;
+    return { token, storage: 'file_fallback', apiUrl };
   }
   return null;
 }
