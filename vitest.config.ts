@@ -1,6 +1,18 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
 
+// esbuild injects `__VERSION__` at build time (esbuild.config.mjs). vitest
+// runs TS source directly with no esbuild step, so `__VERSION__` is
+// undefined inside tests without an explicit define. Use the same value
+// esbuild would inject — package.json#version — so any test that exercises
+// version-aware code paths (e.g., issue #34 upgrade nag) sees the real
+// shipping version.
+const pkgVersion = JSON.parse(readFileSync('./package.json', 'utf-8')).version as string;
+
 export default defineConfig({
+  define: {
+    __VERSION__: JSON.stringify(pkgVersion),
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

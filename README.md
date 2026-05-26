@@ -32,6 +32,15 @@ This is the v1.1.0 scaffold. `init`, `sync`, and `artifact-sync` are stubs that 
 - An active mySecond subscription ([mysecond.ai/pricing](https://mysecond.ai/pricing))
 - Claude Code (Desktop or CLI)
 
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `COMPANION_API_KEY` | Override the device token (legacy / per-shell auth path). |
+| `COMPANION_API_URL` | Override the API host (staging / local dev). |
+| `MYSECOND_NO_KEYCHAIN=1` | Force file-fallback credential storage even on macOS. |
+| `MYSECOND_NO_UPGRADE_NAG=1` | Silence the once-per-day "your CLI is behind" stderr line on session-start sync. |
+
 ## Development
 
 ```bash
