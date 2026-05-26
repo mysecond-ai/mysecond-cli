@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,17 +48,23 @@ function state(lastNpmUpdateAt: string | null): SyncState {
   };
 }
 
-/** Fresh SyncState with the issue-#34 fields populated, for nag tests. */
+/** Fresh structurally-complete SyncState, for nag tests. */
 function nagState(overrides: Partial<SyncState> = {}): SyncState {
   return {
     files: {},
     artifacts: {},
+    contextFiles: {},
     lastSyncedAt: null,
     lastNpmUpdateAt: null,
+    initCompletedSteps: [],
+    step9Auth401RetryCount: 0,
+    customerId: null,
+    workspaceScope: null,
+    customerSlug: null,
     lastKnownLatestNpmVersion: null,
     lastUpgradePromptAt: null,
     ...overrides,
-  } as SyncState;
+  };
 }
 
 describe('shouldRunNpmUpdate', () => {
@@ -379,7 +385,7 @@ describe('maybePrintUpgradeNag', () => {
     const blockedRoot = join(tmpRoot, 'blocked');
     // Write a file at the .claude path so mkdir fails when sync-state
     // tries to create .claude/sync-state.json inside it.
-    require('node:fs').writeFileSync(blockedRoot, 'not-a-directory');
+    writeFileSync(blockedRoot, 'not-a-directory');
     const s = nagState({ lastKnownLatestNpmVersion: '999.0.0' });
     maybePrintUpgradeNag(s, blockedRoot);
     // The stderr line still fires (best-effort persistence shouldn't

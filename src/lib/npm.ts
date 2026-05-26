@@ -136,19 +136,23 @@ export function maybePrintUpgradeNag(state: SyncState, rootDir: string): void {
       'Set MYSECOND_NO_UPGRADE_NAG=1 to silence.\n'
   );
 
-  // Persist BEFORE mutating in-memory state. If the write fails, the
-  // customer sees the nag again tomorrow — annoying but never broken — and
-  // the in-memory `state` stays consistent with disk truth. Without this
-  // ordering, a downstream caller that re-reads `state.lastUpgradePromptAt`
-  // could believe the prompt was stamped when disk says otherwise (codex
-  // review pass, 2026-05-26).
+  // Persist BEFORE mutating in-memory state. If the write fails, leave
+  // `state.lastUpgradePromptAt` null so disk and memory stay consistent —
+  // a downstream caller re-reading `state.lastUpgradePromptAt` always
+  // matches what's on disk. Codex review pass, 2026-05-26.
+  //
+  // Tradeoff on persist failure: the debounce stamp doesn't land, so if
+  // the underlying disk issue persists the customer sees the nag on
+  // every session (not "again tomorrow"). Acceptable best-effort
+  // behavior — a persistent write failure means sync-state itself is
+  // broken and the customer has bigger problems to surface. We never
+  // fail sync because of the debounce stamp.
   const stamp = new Date().toISOString();
   const persisted: SyncState = { ...state, lastUpgradePromptAt: stamp };
   try {
     writeSyncState(rootDir, persisted);
     state.lastUpgradePromptAt = stamp;
   } catch {
-    // Best-effort persistence. Leave in-memory state unchanged. Never
-    // fail sync because of the debounce stamp.
+    // Best-effort persistence. Leave in-memory state unchanged.
   }
 }

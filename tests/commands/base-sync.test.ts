@@ -61,6 +61,8 @@ function seedState(rootDir: string, partial: Partial<SyncState> = {}): void {
     customerId: null,
     workspaceScope: null,
     customerSlug: null,
+    lastKnownLatestNpmVersion: null,
+    lastUpgradePromptAt: null,
   };
   writeSyncState(rootDir, { ...base, ...partial });
 }
@@ -390,5 +392,164 @@ describe('Workstream H — base plugin update sync', () => {
     const code = await runSync([], ctx(root));
     expect(code).toBe(0);
     expect(existsSync(getInstallStatePath(root))).toBe(true);
+  });
+});
+
+// Issue #34 — upgrade-nag end-to-end through runSync.
+// The unit tests in tests/lib/npm.test.ts prove the helpers in isolation; this
+// suite proves the wiring: when the 24h gate is open AND the registry returns
+// a newer version, runSync stores the cached latest, emits the nag to stderr,
+// and persists the debounce stamp to sync-state.json.
+describe('Workstream #34 — upgrade nag integration through runSync', () => {
+  let originalFetch: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let originalHome: string | undefined;
+  let tmpHome: string;
+  let stderrBuf: string;
+  let origStderrWrite: typeof process.stderr.write;
+  let savedNagEnv: string | undefined;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    originalHome = process.env.HOME;
+    tmpHome = mkdtempSync(join(tmpdir(), 'mysecond-nag-int-home-'));
+    process.env.HOME = tmpHome;
+    savedNagEnv = process.env.MYSECOND_NO_UPGRADE_NAG;
+    delete process.env.MYSECOND_NO_UPGRADE_NAG;
+    stderrBuf = '';
+    origStderrWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr.write as unknown) = ((chunk: string | Uint8Array) => {
+      stderrBuf += typeof chunk === 'string' ? chunk : chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+  });
+
+  afterEach(() => {
+    process.stderr.write = origStderrWrite;
+    globalThis.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (savedNagEnv === undefined) delete process.env.MYSECOND_NO_UPGRADE_NAG;
+    else process.env.MYSECOND_NO_UPGRADE_NAG = savedNagEnv;
+  });
+
+  it('on 24h gate fire: fetches latest, caches it, emits nag, persists debounce stamp', async () => {
+    const root = tmpProject();
+    // 24h gate must be OPEN, so lastNpmUpdateAt = null. Also start with no
+    // prior nag stamp.
+    seedState(root, { lastNpmUpdateAt: null });
+
+    // Two fetches in order:
+    //   1. cli-sync (real sync work) — return an empty server response.
+    //   2. npm registry (fetchLatestNpmVersion) — return a far-future
+    //      version so the running CLI is unambiguously behind.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ version: '999.0.0' }),
+    );
+
+    const code = await runSync([], ctx(root));
+    expect(code).toBe(0);
+
+    // Registry was probed.
+    const npmCall = (fetchMock.mock.calls.find(
+      (c) => String((c as unknown[])[0]).includes('registry.npmjs.org'),
+    )) as [URL | string, RequestInit] | undefined;
+    expect(npmCall).toBeDefined();
+
+    // Cached latest is persisted to disk; debounce stamp is too.
+    const raw = readFileSync(join(root, '.claude', 'sync-state.json'), 'utf8');
+    const persisted = JSON.parse(raw) as SyncState;
+    expect(persisted.lastKnownLatestNpmVersion).toBe('999.0.0');
+    expect(persisted.lastUpgradePromptAt).not.toBeNull();
+    expect(persisted.lastNpmUpdateAt).not.toBeNull();
+
+    // Nag fired to stderr.
+    expect(stderrBuf).toContain('mysecond: your CLI is');
+    expect(stderrBuf).toContain('(latest 999.0.0)');
+  });
+
+  it('on 24h gate CLOSED: no registry call, but cached latest still drives the nag', async () => {
+    const root = tmpProject();
+    // Gate closed (recent stamp), but cache already holds a "behind" latest
+    // from a previous gate-open run. This is the most common production
+    // state — most session-starts won't probe the registry.
+    seedState(root, {
+      lastNpmUpdateAt: new Date(Date.now() - 1000).toISOString(),
+      lastKnownLatestNpmVersion: '999.0.0',
+      lastUpgradePromptAt: null,
+    });
+
+    // Only the cli-sync call is expected; no second mock for the registry.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+
+    await runSync([], ctx(root));
+
+    // No registry call.
+    const npmCalls = fetchMock.mock.calls.filter((c) =>
+      String((c as unknown[])[0]).includes('registry.npmjs.org'),
+    );
+    expect(npmCalls).toHaveLength(0);
+
+    // Nag still fired from the cached latest.
+    expect(stderrBuf).toContain('mysecond: your CLI is');
+    expect(stderrBuf).toContain('(latest 999.0.0)');
+
+    // Stamp persisted.
+    const persisted = JSON.parse(
+      readFileSync(join(root, '.claude', 'sync-state.json'), 'utf8'),
+    ) as SyncState;
+    expect(persisted.lastUpgradePromptAt).not.toBeNull();
+  });
+
+  it('does not poison the cache when the registry returns a prerelease', async () => {
+    const root = tmpProject();
+    seedState(root, { lastNpmUpdateAt: null });
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+    // Registry returns a prerelease — should be rejected at the fetch
+    // boundary, not cached.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ version: '1.5.0-beta.1' }),
+    );
+
+    await runSync([], ctx(root));
+
+    const persisted = JSON.parse(
+      readFileSync(join(root, '.claude', 'sync-state.json'), 'utf8'),
+    ) as SyncState;
+    // Cache stays at whatever it was (null in this test) — NOT poisoned.
+    expect(persisted.lastKnownLatestNpmVersion).toBeNull();
+    // No nag (cache is empty).
+    expect(stderrBuf).not.toContain('mysecond: your CLI is');
   });
 });
