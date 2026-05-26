@@ -45,6 +45,16 @@ export interface SyncState {
   workspaceScope: 'solo' | 'team' | null;
   // Customer slug — used to build marketplace name + paths everywhere.
   customerSlug: string | null;
+  // Issue #34 — upgrade-nag plumbing.
+  // `lastKnownLatestNpmVersion` is the last value `fetchLatestNpmVersion`
+  // returned successfully. Cached here so the nag-decision path can compare
+  // `__VERSION__` against it without re-hitting the registry on every sync
+  // (the registry call itself is 24h-gated separately by `lastNpmUpdateAt`).
+  // `lastUpgradePromptAt` debounces the stderr nag — without it, every silent
+  // SessionStart sync that crosses the registry-refresh boundary would re-emit
+  // the same upgrade line.
+  lastKnownLatestNpmVersion: string | null;
+  lastUpgradePromptAt: string | null;
 }
 
 function freshEmptyState(): SyncState {
@@ -59,6 +69,8 @@ function freshEmptyState(): SyncState {
     customerId: null,
     workspaceScope: null,
     customerSlug: null,
+    lastKnownLatestNpmVersion: null,
+    lastUpgradePromptAt: null,
   };
 }
 

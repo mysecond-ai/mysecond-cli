@@ -27,7 +27,12 @@ import {
   writeInstallState,
   type InstallState,
 } from '../lib/install-state.js';
-import { markNpmUpdated, shouldRunNpmUpdate } from '../lib/npm.js';
+import {
+  fetchLatestNpmVersion,
+  markNpmUpdated,
+  maybePrintUpgradeNag,
+  shouldRunNpmUpdate,
+} from '../lib/npm.js';
 import {
   scanArtifacts,
   scanContextFiles,
@@ -740,15 +745,35 @@ export async function runSync(
 
   // The 24h gate is honored; actual `npm update -g @mysecond/customer-{slug}`
   // invocation lands when PR 4c provisions the customer plugin slug to local
-  // state. Until then the gate just stamps the timestamp so the cadence starts
-  // from install day.
+  // state. Until then the gate stamps the timestamp so the cadence starts
+  // from install day AND drives the upgrade-staleness probe (issue #34):
+  // fetch the latest published `@mysecond/cli` version once per 24h and
+  // cache it in sync-state for `maybePrintUpgradeNag` below.
+  //
+  // markNpmUpdated stamps regardless of fetch outcome (success or null).
+  // Rationale: the SessionStart hook runs on EVERY Claude Code session — a
+  // multi-hour npm registry outage would otherwise hammer the registry on
+  // every session start. Worst case of stamping-on-failure is a 24h delay
+  // before the next retry, acceptable for a nag (vs. a feature). Auto-
+  // upgrade follow-up should split `lastNpmUpdateAt` into
+  // `lastVersionCheckAt` so success and failure cadences can diverge —
+  // tracked in the issue #34 plan's "Foundation for auto-upgrade" section.
   if (shouldRunNpmUpdate(state, ctx)) {
+    const latest = await fetchLatestNpmVersion();
+    if (latest !== null) state.lastKnownLatestNpmVersion = latest;
     markNpmUpdated(state);
     summary.npmUpdateRan = true;
   }
 
   state.lastSyncedAt = response.syncedAt;
   writeSyncState(ctx.rootDir, state);
+
+  // Issue #34: emit one stderr line if the running CLI is behind the cached
+  // latest version. Self-persisting (own writeSyncState call) so the 24h
+  // prompt debounce stamp cannot be lost by call-site ordering mistakes.
+  // Called AFTER the writeSyncState above so the same persist isn't done
+  // twice in the common (no-nag) case.
+  maybePrintUpgradeNag(state, ctx.rootDir);
 
   // Self-heal the "duplicate skills" bug (Finding #2) for EXISTING customers.
   // step-9 (plugin install) is skipped on re-runs once the init ledger is
