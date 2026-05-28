@@ -34,6 +34,13 @@ export interface CommandContext {
    * the auth code to the agent.
    */
   authOnly: boolean;
+  /**
+   * `mysecond sync --push-all`. Scans local context/ and work outputs and
+   * pushes them UP to mySecond (the deterministic repair when the SessionStart
+   * sweep / PostToolUse hook never landed files). Normal `sync` is pull-only;
+   * this is the explicit catch-up that doesn't depend on hook side effects.
+   */
+  pushAll: boolean;
 }
 
 export interface ParsedFlags {
@@ -45,6 +52,7 @@ export interface ParsedFlags {
   fix: boolean;
   resume: boolean;
   authOnly: boolean;
+  pushAll: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -61,6 +69,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     fix: false,
     resume: false,
     authOnly: false,
+    pushAll: false,
     strategy: null,
     positional: [],
   };
@@ -79,6 +88,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.resume = true;
     } else if (arg === '--auth-only') {
       out.authOnly = true;
+    } else if (arg === '--push-all') {
+      out.pushAll = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -305,6 +316,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     fix: flags.fix,
     resume: flags.resume,
     authOnly: flags.authOnly,
+    pushAll: flags.pushAll,
     strategy,
   };
 }

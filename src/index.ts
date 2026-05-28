@@ -4,6 +4,7 @@ import { runInit } from './commands/init.js';
 import { runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { runWhereami } from './commands/whereami.js';
+import { runCredentials } from './commands/credentials.js';
 import { runDoctor } from './commands/doctor.js';
 import { setSilentMode } from './lib/silent-status.js';
 import { buildContext, parseGlobalFlags, type CommandContext } from './lib/context.js';
@@ -39,6 +40,11 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     run: runWhereami,
   },
   {
+    name: 'credentials',
+    summary: 'Print this project\'s resolved credential (masked; --plaintext for hooks to source).',
+    run: runCredentials,
+  },
+  {
     name: 'doctor',
     summary: 'Check install state + token health. Reports next-step command on any failure.',
     run: runDoctor,
@@ -64,6 +70,7 @@ function printHelp(): void {
     '  --project-dir <path>   Override $CLAUDE_PROJECT_DIR / cwd',
     '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
     '  --force-update         Bypass the 24-hour npm-update timebox in sync',
+    '  --push-all             Push all local context/ + work output files up to mySecond (`mysecond sync` only). Repairs an empty workspace.',
     '  --fix                  Resolve init conflicts interactively (`mysecond init` only)',
     '  --auth-only            Mint device code, persist state, exit (`mysecond init` only). Pairs with --resume.',
     '  --resume               Resume install from persisted auth state OR re-run device-code OAuth (`mysecond init` only)',
