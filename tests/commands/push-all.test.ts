@@ -115,4 +115,30 @@ describe('mysecond sync --push-all', () => {
     expect(code).toBe(0);
     expect(fetchMock).not.toHaveBeenCalled();
   })
+
+  it('does not claim success when 0 artifacts are accepted (no false "pushed")', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/specs/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/specs/outputs/prd.md'), 'a prd');
+
+    // artifacts POST returns synced:0 (already up to date OR rejected — the
+    // response can't tell). Must NOT print "pushed 0" as success.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ synced: 0 }));
+
+    const errs: string[] = [];
+    const errSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((s: string | Uint8Array) => {
+        errs.push(String(s));
+        return true;
+      });
+
+    // No context files → not a hard failure; artifacts synced:0 → neutral note.
+    const code = await runSync([], ctx(root));
+    errSpy.mockRestore();
+
+    expect(code).toBe(0);
+    const errText = errs.join('');
+    expect(errText).toContain('0 of 1 work artifact');
+  })
 })

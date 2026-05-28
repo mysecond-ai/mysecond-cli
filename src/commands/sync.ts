@@ -602,15 +602,31 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
         );
       }
     } else {
+      // accepted === synced + skipped; report both so a `synced:0, skipped:N`
+      // (everything already up to date) success doesn't read as "pushed 0".
+      const upToDate = res.skipped > 0 ? `, ${res.skipped} already up to date` : '';
       process.stdout.write(
-        `mysecond: pushed ${res.synced} context file(s) to mySecond.\n`
+        `mysecond: pushed ${res.synced} context file(s)${upToDate}.\n`
       );
     }
   }
 
   if (artifacts.length > 0) {
     const ares = await artifactsSync(ctx, artifacts);
-    process.stdout.write(`mysecond: pushed ${ares.synced} work artifact(s).\n`);
+    if (ares.synced > 0) {
+      process.stdout.write(`mysecond: pushed ${ares.synced} work artifact(s).\n`);
+    } else {
+      // ArtifactsResponse carries only { synced } — no errors[]/skipped — so we
+      // can't tell "already up to date" from "rejected". Don't hard-fail (that
+      // would false-fail on a re-run where artifacts are already synced), but
+      // don't claim success either: surface it neutrally. Context-file
+      // failures above remain the hard exit-1 gate (that's what strands users).
+      process.stderr.write(
+        `mysecond: 0 of ${artifacts.length} work artifact(s) were accepted — ` +
+          'they may already be up to date, or the push was rejected. ' +
+          'Run `mysecond doctor` if you expected them to sync.\n'
+      );
+    }
   }
 
   return failed ? 1 : 0;

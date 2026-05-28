@@ -57,11 +57,26 @@ describe('mysecond credentials print', () => {
     expect(out).not.toContain('msd_abcdefghijklmnopqrstuvwxyz');
   });
 
-  it('emits the plaintext token with --plaintext (for hooks to source)', async () => {
+  it('emits the plaintext token SHELL-QUOTED with --plaintext (safe to source)', async () => {
     const code = await runCredentials(['print', '--plaintext'], ctx());
     expect(code).toBe(0);
-    expect(out).toContain('COMPANION_API_KEY=msd_abcdefghijklmnopqrstuvwxyz');
-    expect(out).toContain('COMPANION_API_URL=https://app.mysecond.ai');
+    // Single-quoted so a value with shell metacharacters can't execute on source.
+    expect(out).toContain("COMPANION_API_KEY='msd_abcdefghijklmnopqrstuvwxyz'");
+    expect(out).toContain("COMPANION_API_URL='https://app.mysecond.ai'");
+  });
+
+  it('escapes a single quote in a value for safe sourcing', async () => {
+    const code = await runCredentials(['print', '--plaintext'], ctx({ apiKey: "ab'cd" }));
+    expect(code).toBe(0);
+    // POSIX: ' -> '\'' so the assignment stays a single safe token.
+    expect(out).toContain("COMPANION_API_KEY='ab'\\''cd'");
+  });
+
+  it("rejects an unknown action without printing the credential", async () => {
+    const code = await runCredentials(['dump', '--plaintext'], ctx());
+    expect(code).toBe(2);
+    expect(err).toContain("unknown action 'dump'");
+    expect(out).toBe('');
   });
 
   it('exits 1 with guidance when no credential is resolved', async () => {
