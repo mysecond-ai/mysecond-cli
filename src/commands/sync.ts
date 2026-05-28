@@ -551,12 +551,100 @@ export function readTeamIdFromCreds(rootDir: string): string | null {
   }
 }
 
+/**
+ * `mysecond sync --push-all` — the deterministic repair. Normal `sync` only
+ * pulls; the PostToolUse `artifact-sync` hook only fires on an editor write;
+ * and the SessionStart sweep silently no-ops when it can't find a credential.
+ * So a customer whose context never reached the server (empty `context_files`,
+ * "Install PM OS" screen despite being installed) has no in-product way to
+ * catch up. This scans local context/ + work outputs and pushes them UP using
+ * the resolved credential (admin-capable device token via buildContext).
+ *
+ * Crucially it SURFACES failure: `/api/companion/files` can return
+ * `200 {synced:0, errors:[...]}` (e.g. `cannot_create_protected_file_as_pm`
+ * when the credential resolved as a PM). We treat synced===0 / errors[] as a
+ * failure and print actionable guidance instead of a silent success.
+ */
+async function runPushAll(ctx: CommandContext): Promise<number> {
+  const contextFiles = scanContextFiles(ctx.rootDir);
+  const artifacts = scanArtifacts(ctx.rootDir);
+
+  if (contextFiles.length === 0 && artifacts.length === 0) {
+    process.stdout.write(
+      'mysecond: no local context/ or work output files found to push.\n' +
+        '  Run /welcome in Claude Code to create your context files first.\n'
+    );
+    return 0;
+  }
+
+  let failed = false;
+
+  if (contextFiles.length > 0) {
+    const res = await contextFilesPush(ctx, contextFiles);
+    const errors = res.errors ?? [];
+    const accepted = res.synced + res.skipped;
+    if (errors.length > 0 || accepted === 0) {
+      failed = true;
+      process.stderr.write(
+        `mysecond: sent ${contextFiles.length} context file(s); server accepted ${res.synced}.\n`
+      );
+      if (errors.length > 0) {
+        for (const e of errors.slice(0, 10)) process.stderr.write(`  - ${e}\n`);
+        if (errors.some((e) => e.includes('cannot_create_protected_file_as_pm'))) {
+          process.stderr.write(
+            '  Your credential resolved as a PM (no admin user), so protected context/ files\n' +
+              '  cannot be created. Re-authenticate with an admin device token: `mysecond init --resume`.\n'
+          );
+        }
+      } else {
+        process.stderr.write(
+          '  The server accepted nothing. Check `mysecond doctor` and that your credential is valid.\n'
+        );
+      }
+    } else {
+      // accepted === synced + skipped; report both so a `synced:0, skipped:N`
+      // (everything already up to date) success doesn't read as "pushed 0".
+      const upToDate = res.skipped > 0 ? `, ${res.skipped} already up to date` : '';
+      process.stdout.write(
+        `mysecond: pushed ${res.synced} context file(s)${upToDate}.\n`
+      );
+    }
+  }
+
+  if (artifacts.length > 0) {
+    const ares = await artifactsSync(ctx, artifacts);
+    if (ares.synced > 0) {
+      process.stdout.write(`mysecond: pushed ${ares.synced} work artifact(s).\n`);
+    } else {
+      // ArtifactsResponse carries only { synced } — no errors[]/skipped — so we
+      // can't tell "already up to date" from "rejected". Don't hard-fail (that
+      // would false-fail on a re-run where artifacts are already synced), but
+      // don't claim success either: surface it neutrally. Context-file
+      // failures above remain the hard exit-1 gate (that's what strands users).
+      process.stderr.write(
+        `mysecond: 0 of ${artifacts.length} work artifact(s) were accepted — ` +
+          'they may already be up to date, or the push was rejected. ' +
+          'Run `mysecond doctor` if you expected them to sync.\n'
+      );
+    }
+  }
+
+  return failed ? 1 : 0;
+}
+
 export async function runSync(
   _args: readonly string[],
   ctx: CommandContext
 ): Promise<number> {
   if (ctx.apiKey.length === 0) {
     throw MysecondError.invalidApiKey('COMPANION_API_KEY not set');
+  }
+
+  // `--push-all`: explicit local→server catch-up, independent of the pull
+  // reconcile and the hook side effects. Return early — push-all is a
+  // standalone repair, not part of the normal pull flow.
+  if (ctx.pushAll) {
+    return runPushAll(ctx);
   }
 
   maybeNudgeCredsMigration(ctx);
