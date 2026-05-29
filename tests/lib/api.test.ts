@@ -194,4 +194,20 @@ describe('cliSync — team_id query param', () => {
     expect(url.searchParams.get('previous_paths')).toBe('context/a.md,context/b.md');
     expect(url.searchParams.get('client_base_plugin_version')).toBe('sha123');
   });
+
+  it('sends client_plugin_contract_version when set', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), [], { clientPluginContractVersion: '1' });
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.get('client_plugin_contract_version')).toBe('1');
+  });
+
+  it('omits client_plugin_contract_version when null', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ context_files: [], syncedAt: 'now' }));
+    await cliSync(ctx(), [], { clientPluginContractVersion: null });
+
+    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.searchParams.has('client_plugin_contract_version')).toBe(false);
+  });
 });
