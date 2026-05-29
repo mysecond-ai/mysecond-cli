@@ -63,6 +63,7 @@ import { join } from 'node:path';
 
 import lockfile from 'proper-lockfile';
 
+import { resolveClaudeBin } from './claude-bin.js';
 import { marketplaceName, validateSlug } from './mysecond-paths.js';
 
 /**
@@ -290,7 +291,7 @@ export async function pruneStalePlugins(
   slug: string,
   opts: { claudeBin?: string; silent?: boolean } = {},
 ): Promise<PruneResult> {
-  const claudeBin = opts.claudeBin ?? 'claude';
+  const claudeBin = opts.claudeBin ?? resolveClaudeBin().path;
 
   // planStalePluginPrune validates the slug + applies the allowlist + token
   // guard. An invalid slug / corrupt ledger / no matches all yield an empty

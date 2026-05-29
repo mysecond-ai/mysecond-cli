@@ -15,6 +15,8 @@ function makeContext(opts: {
   userEmail?: string;
   pmName?: string;
   companyName?: string;
+  pluginRegistered?: boolean;
+  registrationDegradedReason?: string;
 }): StepContext {
   const ctx: CommandContext = {
     apiBase: 'https://app.mysecond.ai',
@@ -35,6 +37,8 @@ function makeContext(opts: {
       companyName: opts.companyName,
       userEmail: opts.userEmail,
       pluginCounts: { skills: 91, agents: 6, workflows: 4 },
+      pluginRegistered: opts.pluginRegistered,
+      registrationDegradedReason: opts.registrationDegradedReason,
     },
   };
 }
@@ -153,5 +157,54 @@ describe('step-13: install_completed JSON status event', () => {
     const result = await step13(sctx);
     expect(result.outcome.kind).toBe('completed');
     expect(result.step).toBe(13);
+  });
+
+  it('does NOT claim skills when registration degraded (honest status)', async () => {
+    setSilentMode(true);
+    const sctx = makeContext({
+      silent: true,
+      userEmail: 'ron@mysecond.ai',
+      pmName: 'Ron',
+      companyName: 'mySecond',
+      pluginRegistered: false,
+      registrationDegradedReason: 'claude marketplace add timed out',
+    });
+    await step13(sctx);
+
+    const events = stdoutWrites
+      .filter((s) => s.trim().startsWith('{'))
+      .map((line) => JSON.parse(line.trim()));
+    const completed = events.find((e: { kind?: string }) => e.kind === 'install_completed');
+
+    expect(completed).toBeTruthy();
+    // Watcher still gets a stop signal, but honestly flagged.
+    expect(completed.plugin_registered).toBe(false);
+    expect(completed.context_synced).toBe(true);
+    expect(completed.registration_degraded_reason).toBe('claude marketplace add timed out');
+    // Extraction != registration — counts must be zero even though pluginCounts
+    // (from the extracted tarball) is populated in shared.
+    expect(completed.skills_installed).toBe(0);
+    expect(completed.agents_installed).toBe(0);
+    expect(completed.workflows_installed).toBe(0);
+    expect(completed.message).toContain("didn't finish installing");
+  });
+
+  it('degraded interactive output explains the partial install (no success box)', async () => {
+    setSilentMode(false);
+    const sctx = makeContext({
+      silent: false,
+      userEmail: 'ron@mysecond.ai',
+      pmName: 'Ron',
+      companyName: 'mySecond',
+      pluginRegistered: false,
+      registrationDegradedReason: 'binary not found',
+    });
+    await step13(sctx);
+
+    const allOutput = stdoutWrites.join('');
+    expect(allOutput).toContain("didn't finish installing");
+    expect(allOutput).toContain('re-open Claude Code');
+    // The normal success box must NOT render on a degraded install.
+    expect(allOutput).not.toContain('mySecond PM OS installed');
   });
 });

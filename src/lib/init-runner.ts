@@ -158,6 +158,27 @@ export async function runInit(ctx: CommandContext): Promise<number> {
         throw new MysecondError(1, `step ${entry.number} aborted: ${result.outcome.reason}`);
       }
 
+      // A `degraded` outcome means a step's REQUIRED part succeeded but a
+      // DEGRADABLE part failed (today: step 9 fetched/extracted the marketplace
+      // but couldn't register the plugin with Claude Code). Do NOT abort — the
+      // customer's context must still sync (step 11). Do NOT mark the step
+      // complete, so a re-run / re-open re-attempts the degradable part. The
+      // step itself already set the machine-readable shared flags
+      // (pluginRegistered=false + reason) for step-13 + install telemetry.
+      if (result.outcome.kind === 'degraded') {
+        if (!ctx.silent) {
+          process.stdout.write(
+            `step ${entry.number}/${STEPS.length}: ${entry.description} — partial; continuing so your context still syncs (${result.outcome.reason})\n`
+          );
+        }
+        void emitTelemetry(ctx, 'mysecond.init.step_degraded', {
+          customer_id: state.customerId ?? 'unknown',
+          step_number: entry.number,
+          reason: result.outcome.reason,
+        });
+        continue;
+      }
+
       // Only persist ledger if NOT dry-run. Dry-run runs read-only steps fully
       // (Node version check, install-ready poll, plugin-load probe) but never
       // advances the ledger so the synthetic doesn't pollute the customer's
@@ -186,6 +207,15 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       // top-of-funnel metric for every two-command run.
       void emitTelemetry(ctx, 'mysecond.install.completed', {
         slug: sctx.shared.customerId ?? telemetrySlug,
+        // Honest signal: reaching here means the install finished and step 11
+        // ran (context synced), but plugin_registered may be false if step 9
+        // degraded. Consumers (Desktop watcher / app) MUST read these booleans
+        // and not treat install.completed alone as "skills are ready".
+        context_synced: true,
+        plugin_registered: sctx.shared.pluginRegistered ?? true,
+        ...(sctx.shared.pluginRegistered === false
+          ? { registration_degraded_reason: sctx.shared.registrationDegradedReason ?? 'unknown' }
+          : {}),
       });
     }
 

@@ -20,6 +20,7 @@ import { join } from 'node:path';
 
 import { emitTelemetry, pluginTarball } from '../api.js';
 import { atomicRenameDir } from '../atomic-write.js';
+import { resolveClaudeBin } from '../claude-bin.js';
 import { staleCacheBanner } from '../copy.js';
 import { MysecondError } from '../errors.js';
 import {
@@ -50,6 +51,23 @@ import { writeSyncState } from '../sync-state.js';
 import type { StepFn } from './types.js';
 
 const AUTH_THRASH_THRESHOLD = 3;
+
+// Shared wall-clock budget for the (degradable) plugin-registration phase —
+// `claude plugin marketplace remove/add` + `plugin install`. A short single
+// budget (vs a long per-spawn timeout) means a wedged `claude` degrades fast
+// instead of freezing the install. Registration is non-fatal: on timeout the
+// install continues so context still syncs (step 11).
+const REGISTER_BUDGET_MS = 30_000;
+
+// spawnSync sets signal 'SIGTERM' (status: null) when it kills a process that
+// exceeded its `timeout`; some platforms surface ETIMEDOUT on result.error.
+function isSpawnTimeout(r: ReturnType<typeof spawnSync>): boolean {
+  return (
+    r.signal === 'SIGTERM' ||
+    r.signal === 'SIGKILL' ||
+    (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+  );
+}
 
 export const step9: StepFn = async ({ ctx, state, shared }) => {
   const rawSlug = shared.customerSlug ?? state.customerSlug;
@@ -95,6 +113,29 @@ async function doStep9(
   // the install time is actually consumed here. Emitted as step_9_total_timed
   // at step end (silent mode) and logged to stderr (interactive mode).
   const step9StartMs = performance.now();
+
+  // Resolve the `claude` CLI explicitly. Bare 'claude' isn't on PATH for
+  // native desktop-app installs (it lives at $CLAUDE_CODE_EXECPATH) — the root
+  // cause of desktop-install stranding. resolveClaudeBin never throws; worst
+  // case it returns bare 'claude' (ENOENT still handled below).
+  const claudeBin = resolveClaudeBin({
+    persistedPath: state.lastClaudeBinPath,
+    onExecpathStale: (execpath) => {
+      // Canary: $CLAUDE_CODE_EXECPATH set but not executable → a Claude Code
+      // version bump likely moved the binary. Early warning for ops.
+      void emitTelemetry(ctx, 'mysecond.init.claude_execpath_stale', {
+        customer_id: state.customerId ?? 'unknown',
+        execpath,
+      });
+    },
+  }).path;
+
+  // Happy-path default. Flipped to false only if the degradable registration
+  // phase (9b) fails — see the try/catch around it below. step-13 and the
+  // install telemetry read this so they never claim skills are installed when
+  // registration didn't actually complete.
+  shared.pluginRegistered = true;
+
   // Sub-step (a): fetch signed URL.
   let meta;
   try {
@@ -112,13 +153,15 @@ async function doStep9(
     // re-prompt). subscription_cancelled / plugin_revoked also bypass cache
     // (the customer shouldn't keep running cached content).
     if (err instanceof MysecondError && err.subCode === 'network') {
-      const fallback = tryFallback(slug, state);
+      const fallback = tryFallback(slug, state, claudeBin, Date.now() + REGISTER_BUDGET_MS);
       if (fallback !== null) {
         shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
         shared.pluginVersion = fallback.version;
         // RED-TEAM P0-1: reset counter on ANY successful step 9 completion,
         // including LKG fallback. Without this, customer hits 2 transient 401s,
         // both served from cache, then 1 more 401 → exit 8 forever.
+        // LKG fallback registered the plugin via claudeBin — remember it.
+        state.lastClaudeBinPath = claudeBin;
         state.step9Auth401RetryCount = 0;
         writeSyncState(ctx.rootDir, state);
         // RED-TEAM R2 P1-D: telemetry for ops visibility into LKG usage.
@@ -160,11 +203,13 @@ async function doStep9(
       if (attempt >= 2) {
         // Second mismatch / fetch error → cleanup + try fallback or exit 6.
         rmSync(tmpMarketplaceDir, { recursive: true, force: true });
-        const fallback = tryFallback(slug, state);
+        const fallback = tryFallback(slug, state, claudeBin, Date.now() + REGISTER_BUDGET_MS);
         if (fallback !== null && err instanceof MysecondError && err.subCode === 'network') {
           shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
           shared.pluginVersion = fallback.version;
           // RED-TEAM P0-1: reset counter on LKG fallback success (see above).
+          // LKG fallback registered the plugin via claudeBin — remember it.
+          state.lastClaudeBinPath = claudeBin;
           state.step9Auth401RetryCount = 0;
           writeSyncState(ctx.rootDir, state);
           // RED-TEAM R2 P1-D: telemetry for SHA-mismatch fallback path.
@@ -226,6 +271,37 @@ async function doStep9(
   // atomicRenameDir handles non-empty destination cross-platform via rm+rename.
   atomicRenameDir(tmpMarketplaceDir, marketplaceDir(slug));
 
+  // Fetch + extract + marketplace materialization all succeeded. Clear the
+  // fetch-401 thrash counter NOW — it tracks consecutive signed-URL 401s, and a
+  // successful fetch means we're not thrashing on auth, regardless of how the
+  // (degradable) registration below turns out. Without this, a prior transient
+  // 401 could linger across runs that succeed-fetch-but-degrade-registration.
+  state.step9Auth401RetryCount = 0;
+  writeSyncState(ctx.rootDir, state);
+
+  // === 9b: register the plugin with Claude Code (DEGRADABLE) ===
+  // Everything below shells out to `claude plugin …`. If it fails (ENOENT,
+  // timeout, non-zero), we do NOT abort the install — we return a `degraded`
+  // outcome so the runner continues to step 11 (first sync) and the customer's
+  // context still lands. step-13 reports the degraded state honestly.
+  const registerDeadline = Date.now() + REGISTER_BUDGET_MS;
+  // Hard shared budget. Returns ms remaining; once the deadline passes it
+  // THROWS (→ caught below → degraded) instead of handing out a fresh slice, so
+  // the registration phase can't exceed REGISTER_BUDGET_MS across all spawns.
+  const registerTimeout = (): number => {
+    const remaining = registerDeadline - Date.now();
+    if (remaining <= 0) {
+      throw new MysecondError(
+        6,
+        'Registering the PM OS plugin with Claude Code timed out. Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills.'
+      );
+    }
+    return remaining;
+  };
+  // Declared BEFORE the try so the post-registration timing emit (outside the
+  // try) can read it.
+  const failedPlugins: string[] = [];
+  try {
   // RED-TEAM R2 P0-D: stale-state recovery. If the customer previously ran
   // init successfully and then `rm -rf ~/.mysecond` (manual cleanup, disk
   // sweep, syncthing flap), Claude Code's user-settings still has the
@@ -235,37 +311,48 @@ async function doStep9(
   // Idempotency pattern: remove first (best-effort, swallow non-zero), then
   // add. Covers both first-install (remove is no-op) and stale-pointer cases.
   spawnSync(
-    'claude',
+    claudeBin,
     ['plugin', 'marketplace', 'remove', marketplaceName(slug), '--scope', 'user'],
-    { stdio: 'pipe' }
+    { stdio: 'pipe', timeout: registerTimeout() }
   );
 
   // Sub-step (f): claude plugin marketplace add + claude plugin install.
   // Both verified non-interactive on Ron's Mac 2026-04-22 (DV-1).
   const addResult = spawnSync(
-    'claude',
+    claudeBin,
     ['plugin', 'marketplace', 'add', marketplaceDir(slug), '--scope', 'user'],
-    { stdio: ctx.silent ? 'pipe' : 'inherit' }
+    { stdio: ctx.silent ? 'pipe' : 'inherit', timeout: registerTimeout() }
   );
   // RED-TEAM R2 P1-A: ENOENT detection. spawnSync returns status:null +
-  // error.code='ENOENT' when the binary isn't on PATH (nvm + fish, login vs
-  // non-login shell, custom PATH ordering). Without this check, we'd report
-  // "exit null" which is meaningless to a customer and routes the failure
-  // through the LKG fallback path (which also can't find claude).
+  // error.code='ENOENT' when the binary isn't found. With the resolver this is
+  // now rare (it validates candidates), but the fallback path returns bare
+  // 'claude', so keep the check. This throw is now DEGRADABLE (caught below):
+  // the install continues and context still syncs.
   if (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
     throw new MysecondError(
       6,
-      "Cannot find 'claude' binary on PATH. Make sure Claude Code is installed and `which claude` resolves in this terminal. If you use nvm + a non-bash shell, try: `npm install -g @mysecond/cli` from the same shell where `which claude` works."
+      "Couldn't run the Claude Code CLI to register the PM OS plugin (binary not found). Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills."
+    );
+  }
+  // Timeout detection — spawnSync sets signal:'SIGTERM' (status:null) on a
+  // timeout kill, so this MUST come before the status!==0 check below.
+  if (isSpawnTimeout(addResult)) {
+    throw new MysecondError(
+      6,
+      'Registering the PM OS plugin with Claude Code timed out. Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills.'
     );
   }
   if (addResult.status !== 0) {
     // Try last-known-good fallback if marketplace add fails (e.g., Claude Code
-    // version mismatch or transient marketplace state).
-    const fallback = tryFallback(slug, state);
+    // version mismatch or transient marketplace state). Shares the registration
+    // deadline so the fallback can't exceed the hard budget.
+    const fallback = tryFallback(slug, state, claudeBin, registerDeadline);
     if (fallback !== null) {
       shared.staleCacheUsed = { cachedAgeHours: fallback.cachedAgeHours };
       shared.pluginVersion = fallback.version;
       // RED-TEAM P0-1: reset counter on LKG fallback success.
+      // LKG fallback registered the plugin via claudeBin — remember it.
+      state.lastClaudeBinPath = claudeBin;
       state.step9Auth401RetryCount = 0;
       writeSyncState(ctx.rootDir, state);
       // RED-TEAM R2 P1-D: telemetry for marketplace-add-failure fallback path.
@@ -292,7 +379,6 @@ async function doStep9(
   // multi-plugin future. Tracks failures; hard-fails on the sentinel
   // (`pm-os` itself) since that's the entire install — non-sentinel
   // failures degrade gracefully.
-  const failedPlugins: string[] = [];
   for (let pluginIdx = 0; pluginIdx < plugins.length; pluginIdx++) {
     // plugins[] is bounded by the loop condition; the non-null assertion is safe.
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -302,9 +388,9 @@ async function doStep9(
     // which plugin(s) are slow before deciding whether to parallelize.
     const pluginStartMs = performance.now();
     const installResult = spawnSync(
-      'claude',
+      claudeBin,
       ['plugin', 'install', spec, '--scope', 'user'],
-      { stdio: ctx.silent ? 'pipe' : 'inherit' }
+      { stdio: ctx.silent ? 'pipe' : 'inherit', timeout: registerTimeout() }
     );
     const pluginDurationMs = Math.round(performance.now() - pluginStartMs);
 
@@ -328,12 +414,18 @@ async function doStep9(
       );
     }
 
-    // ENOENT on the binary is fatal regardless of which plugin in the loop
-    // hit it — PATH issue affects every plugin install.
+    // ENOENT / timeout on the binary affects every plugin install. Now
+    // DEGRADABLE (caught below): the install continues and context still syncs.
     if (installResult.error !== undefined && (installResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new MysecondError(
         6,
-        "Cannot find 'claude' binary on PATH (between marketplace add + plugin install). Re-run `mysecond init` from the same shell where `which claude` works."
+        "Couldn't run the Claude Code CLI to install the PM OS plugin (binary not found). Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills."
+      );
+    }
+    if (isSpawnTimeout(installResult)) {
+      throw new MysecondError(
+        6,
+        'Installing the PM OS plugin into Claude Code timed out. Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills.'
       );
     }
     if (installResult.status !== 0) {
@@ -362,6 +454,30 @@ async function doStep9(
   if (failedPlugins.length > 0) {
     shared.failedPlugins = failedPlugins;
   }
+  } catch (err) {
+    // 9b (registration: marketplace remove/add + plugin install) failed —
+    // DEGRADABLE. The marketplace was already materialized, so returning
+    // `degraded` lets the runner continue to step 11 (first sync): the
+    // customer's context still lands and step-13 / install telemetry report
+    // honestly that skills didn't finish. NOT ledgered (runner skips
+    // markStepComplete on `degraded`), so a re-run / re-open re-attempts it.
+    // SCOPED to ONLY the spawn region above — the post-registration bookkeeping
+    // below (prune, probe, cache, persist) runs OUTSIDE this try, so a hiccup
+    // there can never mislabel a SUCCESSFUL registration as degraded.
+    const reason = err instanceof Error ? err.message : String(err);
+    shared.pluginRegistered = false;
+    shared.registrationDegradedReason = reason;
+    void emitTelemetry(ctx, 'mysecond.init.plugin_registration_degraded', {
+      customer_id: state.customerId ?? 'unknown',
+      reason,
+    });
+    if (!ctx.silent) {
+      process.stderr.write(`[mysecond] ${reason}\n`);
+    }
+    return { step: 9, outcome: { kind: 'degraded', reason } };
+  }
+
+  // === Registration succeeded — post-registration bookkeeping (NOT degradable) ===
 
   // Make the install REPLACING, not additive (Finding #2 — "duplicate skills").
   // During the 2026-05-04→05 multi-category experiment, customers were
@@ -414,7 +530,10 @@ async function doStep9(
   // Cache the validated extracted tree as last-known-good.
   cacheLastKnownGood(slug, meta.version, meta.sha256, join(marketplaceDir(slug), 'plugin'));
 
-  // Reset auth-thrash counter on success (CTO-v1.3-B3 critical).
+  // Registration succeeded. Remember the working `claude` path so a later
+  // plain-terminal context (where $CLAUDE_CODE_EXECPATH is unset) can still
+  // resolve the binary. Counter was already cleared post-fetch; keep it 0.
+  state.lastClaudeBinPath = claudeBin;
   state.step9Auth401RetryCount = 0;
   writeSyncState(ctx.rootDir, state);
 
@@ -444,10 +563,19 @@ async function doStep9(
 // surface this to the customer.
 function tryFallback(
   slug: string,
-  _state: import('../sync-state.js').SyncState
+  _state: import('../sync-state.js').SyncState,
+  claudeBin: string,
+  // Shared spawn deadline (epoch ms). The fallback's claude spawns draw from
+  // the SAME budget as the main registration path — without this, a fallback
+  // after an add-failure could spend a fresh full budget per spawn and blow the
+  // hard ceiling on a wedged binary.
+  deadline: number,
 ): { version: string; cachedAgeHours: number } | null {
   const hit = findLastKnownGood(slug);
   if (hit === null) return null;
+  // Budget already exhausted (e.g. the main add spawn timed out) → don't start
+  // more spawns; treat as a fallback miss.
+  if (deadline - Date.now() <= 0) return null;
 
   // Rehydrate: copy cached version into marketplace dir (so claude plugin
   // marketplace add works against it). This is a synchronous best-effort
@@ -483,19 +611,20 @@ function tryFallback(
     // Run marketplace add against the rehydrated dir (best-effort — if Claude
     // Code is also down or admin-restricted, this fails and we surface error).
     const result = spawnSync(
-      'claude',
+      claudeBin,
       ['plugin', 'marketplace', 'add', marketplaceTarget, '--scope', 'user'],
-      { stdio: 'pipe' }
+      { stdio: 'pipe', timeout: Math.max(1, deadline - Date.now()) }
     );
     if (result.status !== 0) return null;
 
     // Install loop over the LKG plugins. Same sentinel-fail-hard semantics
     // as the main path: `pm-os` MUST install for fallback to count.
     for (const plugin of plugins) {
+      if (deadline - Date.now() <= 0) return null; // budget exhausted mid-loop
       const installResult = spawnSync(
-        'claude',
+        claudeBin,
         ['plugin', 'install', pluginInstallSpec(slug, plugin.name), '--scope', 'user'],
-        { stdio: 'pipe' }
+        { stdio: 'pipe', timeout: Math.max(1, deadline - Date.now()) }
       );
       if (installResult.status !== 0 && plugin.name === SENTINEL_PLUGIN_NAME) {
         return null;

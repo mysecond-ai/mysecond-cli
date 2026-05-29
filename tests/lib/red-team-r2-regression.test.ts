@@ -149,9 +149,13 @@ describe('RED-TEAM R2 P1-A: spawnSync ENOENT produces actionable error', () => {
     expect(enoentChecks.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('ENOENT error message mentions PATH + claude binary', () => {
-    expect(stepSrc).toMatch(/Cannot find 'claude' binary/);
-    expect(stepSrc).toMatch(/PATH/);
+  it('ENOENT error message is actionable (binary issue + recovery)', () => {
+    // Registration is now DEGRADABLE: the ENOENT copy no longer tells the user
+    // to fix PATH / `which claude` (pointless on a desktop-app install where
+    // claude isn't on PATH at all). It states the binary couldn't run and gives
+    // a concrete recovery — re-open Claude Code / re-run the install.
+    expect(stepSrc).toMatch(/binary not found/);
+    expect(stepSrc).toMatch(/re-open Claude Code/);
   });
 });
 
