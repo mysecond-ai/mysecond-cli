@@ -1,8 +1,9 @@
 // @mysecond/cli — entry point. Parses global flags, builds CommandContext, dispatches.
 
 import { runInit } from './commands/init.js';
-import { runSync } from './commands/sync.js';
+import { runPushOnly, runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+import { runPluginRefresh } from './commands/plugin-refresh.js';
 import { runWhereami } from './commands/whereami.js';
 import { runCredentials } from './commands/credentials.js';
 import { runDoctor } from './commands/doctor.js';
@@ -30,9 +31,24 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     run: runSync,
   },
   {
+    // The realtime turn-end push hook (Stop/SubagentStop) targets this
+    // SUBCOMMAND, not `sync --push-only`, on purpose: an OLD CLI that predates
+    // it exits non-zero on an unknown subcommand (whereas `sync` silently
+    // swallows an unknown flag and runs a full pull), so the hook's
+    // `|| npx @latest` fallback reliably fires for every install cohort.
+    name: 'push',
+    summary: 'Push changed context/work files up to mysecond.ai (no pull). Used by the realtime hook.',
+    run: (_args, ctx) => runPushOnly(ctx),
+  },
+  {
     name: 'artifact-sync',
     summary: 'Push a changed artifact (skill output, doc, plan) up to mysecond.ai.',
     run: runArtifactSync,
+  },
+  {
+    name: 'plugin-refresh',
+    summary: 'Re-install the latest PM OS plugin — refreshes hooks/skills for an existing install.',
+    run: runPluginRefresh,
   },
   {
     name: 'whereami',
@@ -71,6 +87,7 @@ function printHelp(): void {
     '  --strategy <mode>      Conflict resolution: prompt | cloud-wins | local-wins | skip',
     '  --force-update         Bypass the 24-hour npm-update timebox in sync',
     '  --push-all             Push all local context/ + work output files up to mySecond (`mysecond sync` only). Repairs an empty workspace.',
+    '  --push-only            Push only CHANGED context/work files, skip the pull (`mysecond sync` only). Used by the per-turn realtime hook.',
     '  --fix                  Resolve init conflicts interactively (`mysecond init` only)',
     '  --auth-only            Mint device code, persist state, exit (`mysecond init` only). Pairs with --resume.',
     '  --resume               Resume install from persisted auth state OR re-run device-code OAuth (`mysecond init` only)',

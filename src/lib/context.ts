@@ -41,6 +41,13 @@ export interface CommandContext {
    * this is the explicit catch-up that doesn't depend on hook side effects.
    */
   pushAll: boolean;
+  /**
+   * `mysecond sync --push-only`. Runs ONLY the up-sync half (changed artifacts +
+   * context files), skipping the pull/reconcile entirely. The Stop/SubagentStop
+   * hook uses this for once-per-turn realtime push without re-pulling skills
+   * every turn. Incremental (hash-gated) — unlike --push-all which force-scans.
+   */
+  pushOnly: boolean;
 }
 
 export interface ParsedFlags {
@@ -53,6 +60,7 @@ export interface ParsedFlags {
   resume: boolean;
   authOnly: boolean;
   pushAll: boolean;
+  pushOnly: boolean;
   strategy: ConflictStrategy | null;
   positional: string[];
 }
@@ -70,6 +78,7 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
     resume: false,
     authOnly: false,
     pushAll: false,
+    pushOnly: false,
     strategy: null,
     positional: [],
   };
@@ -90,6 +99,8 @@ export function parseGlobalFlags(args: readonly string[]): ParsedFlags {
       out.authOnly = true;
     } else if (arg === '--push-all') {
       out.pushAll = true;
+    } else if (arg === '--push-only') {
+      out.pushOnly = true;
     } else if (arg === '--api-key') {
       const next = args[i + 1];
       if (next === undefined) throw MysecondError.invalidFlag('--api-key', 'requires a value');
@@ -317,6 +328,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     resume: flags.resume,
     authOnly: flags.authOnly,
     pushAll: flags.pushAll,
+    pushOnly: flags.pushOnly,
     strategy,
   };
 }

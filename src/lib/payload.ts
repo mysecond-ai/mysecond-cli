@@ -148,6 +148,13 @@ export const CONTEXT_DIR = 'context';
 // Server PER_FILE_LIMIT is 50KB. Pre-filter to skip wasted round-trips.
 export const CONTEXT_PER_FILE_LIMIT = 50 * 1024;
 
+// Server artifact cap is 500KB (mysecond-app /api/companion/artifacts rejects
+// content > 500*1024). The scan skips anything larger client-side — both to
+// avoid a guaranteed-reject round-trip and, critically, so the per-turn Stop
+// sweep (`sync --push-only`) can't OOM/stall on a giant file. Mirrors
+// CONTEXT_PER_FILE_LIMIT's role for context files.
+export const ARTIFACT_PER_FILE_LIMIT = 500 * 1024;
+
 // Filenames under context/ that are auto-generated metadata, not real context
 // files. These must not sync to context_files. PMO-4: `index.md` is generated
 // by various tools as a directory listing/index — treating it as user-edited
@@ -348,7 +355,19 @@ function walkArtifactDir(
     }
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
 
-    const content = readFileSync(fullPath, 'utf8');
+    let content: string;
+    try {
+      // stat first — a giant or transient artifact must not OOM or throw the
+      // per-turn Stop sweep (mirrors walkContextDir). Skip empties and anything
+      // over the server's artifact cap (it would be rejected server-side
+      // anyway). A read error (file vanished mid-turn, permissions) is skipped,
+      // never propagated — one bad file can't fail the whole push-only sweep.
+      const stat = statSync(fullPath);
+      if (stat.size === 0 || stat.size > ARTIFACT_PER_FILE_LIMIT) continue;
+      content = readFileSync(fullPath, 'utf8');
+    } catch {
+      continue;
+    }
     const relativePath = relative(rootDir, fullPath);
     const parentDir = basename(currentDir);
     const pmNameMatch = parentDir.match(/^\d{4}-\d{2}-\d{2}-\d{4}-(.+)$/);
