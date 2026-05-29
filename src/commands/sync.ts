@@ -985,9 +985,11 @@ export async function runSync(
   // twice in the common (no-nag) case.
   maybePrintUpgradeNag(state, ctx.rootDir);
 
-  // Plugin-refresh nudge (separate axis from the npm nag above): one stderr line
-  // when the installed plugin's contract version is behind the latest the server
-  // returned. Self-persisting + 24h-debounced; reuses MYSECOND_NO_UPGRADE_NAG.
+  // Plugin-refresh nudge (separate axis from the npm nag above): one stdout line
+  // (SessionStart-hook stdout → the model's session-start context, which it
+  // relays; stderr would be dropped) when the installed plugin's contract version
+  // is behind the latest the server returned. Self-persisting + 24h-debounced;
+  // reuses MYSECOND_NO_UPGRADE_NAG.
   maybePrintPluginRefreshNudge(
     state,
     ctx.rootDir,

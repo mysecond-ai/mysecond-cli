@@ -53,6 +53,12 @@ describe('isPluginContractBehind', () => {
     expect(isPluginContractBehind(null, '1.5')).toBe(false);
   });
 
+  it('fail-closed on non-string inputs — JSON/sync-state can lie at runtime (Codex review)', () => {
+    expect(isPluginContractBehind(null, 2 as unknown as string)).toBe(false);
+    expect(isPluginContractBehind('1', 2 as unknown as string)).toBe(false);
+    expect(isPluginContractBehind(2 as unknown as string, '3')).toBe(false);
+  });
+
   it('installed < latest → true', () => {
     expect(isPluginContractBehind('1', '2')).toBe(true);
   });
@@ -117,14 +123,27 @@ describe('maybePrintPluginRefreshNudge', () => {
     expect(stdoutBuf).not.toContain('mySecond:');
   });
 
-  it('emits one stdout line (session-start context) when behind', () => {
-    const s = mkState({ installedPluginContractVersion: '1' });
-    maybePrintPluginRefreshNudge(s, tmpRoot, '2');
-    expect(stdoutBuf).toContain('an update to your PM OS is ready');
-    expect(stdoutBuf).toContain('plugin-refresh --force-update');
-    expect(stdoutBuf).toContain('start a new session');
-    // Exactly one nudge line (count the 'mySecond:' marker).
-    expect(stdoutBuf.split('mySecond:').length - 1).toBe(1);
+  it('emits one stdout line (session-start context) when behind — and nothing on stderr', () => {
+    // Belt-and-suspenders for the channel: capture stderr too and assert the
+    // nudge does NOT also land there (Claude Code drops SessionStart stderr).
+    let stderrBuf = '';
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stderr.write as unknown) = ((c: string | Uint8Array) => {
+      stderrBuf += typeof c === 'string' ? c : c.toString();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const s = mkState({ installedPluginContractVersion: '1' });
+      maybePrintPluginRefreshNudge(s, tmpRoot, '2');
+      expect(stdoutBuf).toContain('an update to your PM OS is ready');
+      expect(stdoutBuf).toContain('plugin-refresh --force-update');
+      expect(stdoutBuf).toContain('start a new session');
+      // Exactly one nudge line (count the 'mySecond:' marker).
+      expect(stdoutBuf.split('mySecond:').length - 1).toBe(1);
+      expect(stderrBuf).not.toContain('mySecond:');
+    } finally {
+      process.stderr.write = origErr;
+    }
   });
 
   it('nudges a null-installed (pre-feature cohort) customer', () => {

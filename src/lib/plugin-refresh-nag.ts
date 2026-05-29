@@ -21,13 +21,18 @@ export function isPluginContractBehind(
   installed: string | null,
   latest: string | null | undefined
 ): boolean {
-  if (latest === null || latest === undefined || latest.length === 0) return false;
-  // Validate `latest` BEFORE the null-installed branch (Codex review): a
-  // malformed latest from a new app (e.g. 'abc', '0', '1.5') must fail closed —
-  // no nudge — even for a pre-feature (installed === null) cohort install.
+  // Runtime type-guard (Codex review): `latest`/`installed` are typed as strings,
+  // but they arrive from JSON (the cli-sync response) and sync-state.json with no
+  // runtime validation. A non-string value (the app returns `2` not `'2'`, or a
+  // corrupted state file) must fail closed — "any ambiguity returns false".
+  if (typeof latest !== 'string' || latest.length === 0) return false;
+  // Validate `latest` BEFORE the null-installed branch: a malformed latest from a
+  // new app (e.g. 'abc', '0', '1.5') must fail closed — no nudge — even for a
+  // pre-feature (installed === null) cohort install.
   const l = Number(latest);
   if (!Number.isSafeInteger(l) || l < 1) return false;
   if (installed === null) return true; // pre-feature install + valid latest → behind
+  if (typeof installed !== 'string') return false; // corrupted sync-state → fail closed
   const i = Number(installed);
   if (!Number.isSafeInteger(i) || i < 1) return false;
   return i < l;
