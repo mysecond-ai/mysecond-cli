@@ -151,20 +151,23 @@ const SYNC_STATE_LOCK_MIN_TIMEOUT_MS = 100;
  * don't clobber each other. `writeSyncState` replaces the WHOLE file, so two
  * writers that each `read → mutate → write` can lose one another's keys: the
  * PostToolUse `artifact-sync` hook (records one context-file hash) and the Stop
- * `sync --push-only` sweep (records many artifact/context hashes) fire close
- * together, and without serialization the later write would drop the earlier
- * one's freshly-recorded hash (→ a benign but wasteful re-push next turn). The
- * mutator runs against state read FRESH under the lock, so it only ever adds to
- * the latest on-disk state.
+ * `push` sweep (records many artifact/context hashes) fire close together, and
+ * without serialization the later write would drop the earlier one's
+ * freshly-recorded hash. The mutator runs against state read FRESH under the
+ * lock, so it only ever adds to the latest on-disk state.
  *
- * Best-effort by contract: hooks must never crash on lock contention. If the
- * lock can't be acquired (timeout, unsupported FS), we fall back to an unlocked
- * read-modify-write — no worse than the pre-lock behavior, and the common
- * (uncontended) case is fully serialized.
+ * Best-effort by contract: callers must never crash on lock contention. If the
+ * lock can't be acquired we SKIP the write — we do NOT write unlocked, which
+ * could clobber a concurrent locked writer. The common (uncontended) case
+ * always serializes; on the rare miss the mutation is simply re-done next time.
+ * `opts.retries` lets an important, low-frequency writer (e.g. plugin-refresh
+ * recording installedPluginVersion) wait harder so it effectively never skips,
+ * while hot-path hooks keep the default fast-skip.
  */
 export async function updateSyncState(
   rootDir: string,
-  mutate: (state: SyncState) => void
+  mutate: (state: SyncState) => void,
+  opts: { retries?: number } = {}
 ): Promise<void> {
   const path = projectPaths(rootDir).syncStatePath;
   mkdirSync(dirname(path), { recursive: true });
@@ -179,7 +182,7 @@ export async function updateSyncState(
   try {
     release = await lockfile.lock(path, {
       retries: {
-        retries: SYNC_STATE_LOCK_RETRIES,
+        retries: opts.retries ?? SYNC_STATE_LOCK_RETRIES,
         minTimeout: SYNC_STATE_LOCK_MIN_TIMEOUT_MS,
       },
       stale: SYNC_STATE_LOCK_STALE_MS,

@@ -139,8 +139,11 @@ export async function runPluginRefresh(
     // rename then failed. Move the old dir aside, move the new one in, drop the
     // old — and restore the old if the rename fails. The marketplace dir is
     // never left missing. All paths share a parent, so renameSync is atomic.
+    // Fixed `.bak` name (not pid-suffixed): the marketplace lock serializes
+    // refreshes so there's no collision, and the leading rmSync clears any stale
+    // backup a previously-crashed swap left behind (a pid suffix would orphan).
     const finalDir = marketplaceDir(slug);
-    const backupDir = `${finalDir}.bak-${process.pid}`;
+    const backupDir = `${finalDir}.bak`;
     const hadExisting = existsSync(finalDir);
     rmSync(backupDir, { recursive: true, force: true });
     if (hadExisting) renameSync(finalDir, backupDir);
@@ -182,10 +185,17 @@ export async function runPluginRefresh(
     // Record the version ACTUALLY installed FIRST (the durable, important
     // persist), THEN cache last-known-good best-effort — a cache write failure
     // must not make a successful refresh exit non-zero or lose the version.
-    await updateSyncState(ctx.rootDir, (s) => {
-      s.installedPluginVersion = meta.version;
-      s.lastClaudeBinPath = claudeBin;
-    });
+    // retries: 10 — this is the one durable, important write (it gates whether a
+    // future refresh needlessly re-installs). plugin-refresh is rare + not a hot
+    // path, so it waits out contention rather than fast-skipping like the hooks.
+    await updateSyncState(
+      ctx.rootDir,
+      (s) => {
+        s.installedPluginVersion = meta.version;
+        s.lastClaudeBinPath = claudeBin;
+      },
+      { retries: 10 }
+    );
     try {
       cacheLastKnownGood(slug, meta.version, meta.sha256, join(finalDir, 'plugin'));
     } catch {

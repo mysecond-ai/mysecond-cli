@@ -653,7 +653,7 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
  * Best-effort + silent-safe: a push failure is swallowed under --silent (the
  * hook path) and surfaced in interactive mode; the command always returns 0.
  */
-async function runPushOnly(ctx: CommandContext): Promise<number> {
+export async function runPushOnly(ctx: CommandContext): Promise<number> {
   const state = readSyncState(ctx.rootDir);
   const opts = silentSyncOpts(ctx);
 
@@ -675,6 +675,11 @@ async function runPushOnly(ctx: CommandContext): Promise<number> {
       // (synced < count) must not mark un-accepted files as pushed — that would
       // suppress retry until the file changes again. On a partial/failed push
       // we record nothing and the next turn retries.
+      //
+      // No "already-current → synced:0 → re-push forever" loop: the artifacts
+      // endpoint UPSERTS every accepted file (it has no unchanged-skip path), so
+      // synced === count on a clean accept. A synced < count therefore means a
+      // genuine conflict/error on those files — correct to retry, not record.
       if (res.synced >= toSync.length) {
         const now = new Date().toISOString();
         for (const a of toSync) {

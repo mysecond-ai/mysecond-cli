@@ -1,7 +1,7 @@
 // @mysecond/cli — entry point. Parses global flags, builds CommandContext, dispatches.
 
 import { runInit } from './commands/init.js';
-import { runSync } from './commands/sync.js';
+import { runPushOnly, runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
 import { runPluginRefresh } from './commands/plugin-refresh.js';
 import { runWhereami } from './commands/whereami.js';
@@ -29,6 +29,16 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     name: 'sync',
     summary: 'Sync the latest context, skills, and agents from mysecond.ai into the workspace.',
     run: runSync,
+  },
+  {
+    // The realtime turn-end push hook (Stop/SubagentStop) targets this
+    // SUBCOMMAND, not `sync --push-only`, on purpose: an OLD CLI that predates
+    // it exits non-zero on an unknown subcommand (whereas `sync` silently
+    // swallows an unknown flag and runs a full pull), so the hook's
+    // `|| npx @latest` fallback reliably fires for every install cohort.
+    name: 'push',
+    summary: 'Push changed context/work files up to mysecond.ai (no pull). Used by the realtime hook.',
+    run: (_args, ctx) => runPushOnly(ctx),
   },
   {
     name: 'artifact-sync',
