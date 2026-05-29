@@ -55,6 +55,12 @@ export interface SyncState {
   // the same upgrade line.
   lastKnownLatestNpmVersion: string | null;
   lastUpgradePromptAt: string | null;
+  // Last-seen working `claude` CLI path (resolveClaudeBin persists it on a
+  // successful spawn). Lets a plain-terminal context — where
+  // $CLAUDE_CODE_EXECPATH is unset (e.g. the `plugin-install` remediation) —
+  // still resolve the binary instead of falling through to PATH lookups that
+  // fail on desktop-app installs.
+  lastClaudeBinPath: string | null;
 }
 
 function freshEmptyState(): SyncState {
@@ -71,6 +77,7 @@ function freshEmptyState(): SyncState {
     customerSlug: null,
     lastKnownLatestNpmVersion: null,
     lastUpgradePromptAt: null,
+    lastClaudeBinPath: null,
   };
 }
 

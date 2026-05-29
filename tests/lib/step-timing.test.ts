@@ -87,7 +87,7 @@ describe('Fix C Step 1 — step-9 structural timing assertions', () => {
     // The emitStatus call must come before the ENOENT check so we capture
     // timing data even when the install fails.
     const emojiPos = source.indexOf("kind: 'plugin_install_timed'");
-    const enoentPos = source.indexOf("Cannot find 'claude' binary on PATH (between marketplace add");
+    const enoentPos = source.indexOf("Couldn't run the Claude Code CLI to install the PM OS plugin");
     expect(emojiPos).toBeGreaterThan(0);
     expect(enoentPos).toBeGreaterThan(0);
     expect(emojiPos).toBeLessThan(enoentPos);

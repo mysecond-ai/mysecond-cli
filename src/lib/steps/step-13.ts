@@ -23,32 +23,49 @@ export const step13: StepFn = async ({ ctx, shared }) => {
   const pmName = shared.pmName ?? 'you';
   const companyName = shared.companyName ?? 'your company';
 
+  // Did the plugin actually REGISTER with Claude Code? Step 9 sets this false
+  // when its degradable registration phase failed (binary unresolvable, timeout,
+  // non-zero exit). countPluginContents() reads the EXTRACTED tarball — and
+  // extraction is NOT registration, so on a degraded install those counts would
+  // claim skills that aren't actually loadable. Gate everything on registration.
+  const registered = shared.pluginRegistered ?? true;
+
   // Count installed skills/agents/workflows from the extracted plugin tree as
-  // proof the install populated content. Best-effort: if the slug is missing
-  // or the extract dir is unreadable, counts default to all-zero and the
-  // success copy degrades to a generic "PM skill library" phrase.
-  if (shared.pluginCounts === undefined && shared.customerSlug !== undefined) {
+  // proof the install populated content. Only meaningful when registered.
+  if (registered && shared.pluginCounts === undefined && shared.customerSlug !== undefined) {
     shared.pluginCounts = countPluginContents(pluginExtractDir(shared.customerSlug));
   }
 
   if (!ctx.silent) {
-    process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts, shared.isInvitedPm ?? false) + '\n\n');
+    if (registered) {
+      process.stdout.write('\n' + successBox(pmName, companyName, shared.pluginCounts, shared.isInvitedPm ?? false) + '\n\n');
+    } else {
+      // Degraded: be honest. Context synced, skills did not finish installing.
+      process.stdout.write(
+        `\nYour context for ${companyName} synced successfully — but the PM OS skills didn't finish installing in this session.\n` +
+          `To finish loading them, re-open Claude Code (or re-run the install command). Your data is safe and already synced.\n\n`,
+      );
+    }
   }
 
-  // Emit install_completed JSON status event (Item 5B). Calls
-  // emitInstallCompleted (not emitStatus) so this event always reaches stdout
-  // regardless of --silent mode — it is the deterministic "done" signal the
-  // Claude Code Desktop chat assistant needs to stop its watcher loop.
-  // The '\n\n' above (after successBox) is what separates the success box from
-  // this JSON line — emitInstallCompleted does not add leading whitespace.
-  // shared.userEmail is populated by step-15 from /whoami; falls back to
-  // "you" if /whoami had a network error or didn't return an email field.
+  // Emit install_completed JSON status event (Item 5B). Always reaches stdout
+  // (even --silent) — the deterministic "done" signal the Claude Code Desktop
+  // chat watcher needs to stop its loop. We keep kind='install_completed' so an
+  // existing watcher still stops, but carry plugin_registered/context_synced so
+  // it (and the web app) can distinguish a full install from a degraded one and
+  // never claim skills are ready when they aren't. skills counts are zeroed when
+  // registration degraded (extraction != registration).
   emitInstallCompleted({
     kind: 'install_completed',
-    message: installCompleteClaudeMessage(shared.userEmail ?? 'you'),
-    skills_installed: shared.pluginCounts?.skills ?? 0,
-    agents_installed: shared.pluginCounts?.agents ?? 0,
-    workflows_installed: shared.pluginCounts?.workflows ?? 0,
+    message: registered
+      ? installCompleteClaudeMessage(shared.userEmail ?? 'you')
+      : `Context synced for ${shared.userEmail ?? 'you'}, but the PM OS skills didn't finish installing — re-open Claude Code (or re-run the install) to finish.`,
+    context_synced: true,
+    plugin_registered: registered,
+    skills_installed: registered ? (shared.pluginCounts?.skills ?? 0) : 0,
+    agents_installed: registered ? (shared.pluginCounts?.agents ?? 0) : 0,
+    workflows_installed: registered ? (shared.pluginCounts?.workflows ?? 0) : 0,
+    ...(registered ? {} : { registration_degraded_reason: shared.registrationDegradedReason ?? 'unknown' }),
   });
 
   return { step: 13, outcome: { kind: 'completed' } };

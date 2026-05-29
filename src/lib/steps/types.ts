@@ -36,6 +36,14 @@ export interface StepContext {
     // Step 9 populates these from /plugin-tarball + extraction.
     pluginVersion?: string;
     pluginSha256?: string;
+    // Step 9 registration outcome. The marketplace fetch/extract is fatal, but
+    // registering the plugin with Claude Code (`claude plugin …`) is degradable:
+    // if it fails, the install continues so context still syncs (step 11), and
+    // step 13 / install telemetry report the degraded state honestly instead of
+    // claiming skills are installed. `pluginRegistered` defaults to true on the
+    // happy path; set false + `registrationDegradedReason` when 9b degrades.
+    pluginRegistered?: boolean;
+    registrationDegradedReason?: string;
     // Workstream B Day 5+: sub-plugin install loop (multi-plugin PMO
     // marketplace) tracks any non-sentinel plugins whose `claude plugin
     // install` exited non-zero. Sentinel (pm-os) failure is
@@ -60,6 +68,7 @@ export interface StepContext {
 export type StepOutcome =
   | { kind: 'completed' }                                       // step ran (or was already complete)
   | { kind: 'skipped'; reason: string }                          // intentionally skipped (--dry-run)
+  | { kind: 'degraded'; reason: string }                         // step's required part ran, but a degradable part failed: do NOT ledger it (so it re-runs), but continue the install (don't abort)
   | { kind: 'aborted'; reason: string };                         // step decided to halt the whole init w/o throwing
 
 export interface StepResult {
