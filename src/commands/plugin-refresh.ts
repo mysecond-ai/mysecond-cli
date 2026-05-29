@@ -35,6 +35,7 @@ import {
   pluginTmpExtractDir,
   validateSlug,
 } from '../lib/mysecond-paths.js';
+import { readInstalledPluginContractVersion } from '../lib/plugin-meta.js';
 import { registerMarketplaceAndInstall } from '../lib/plugin-register.js';
 import { fetchAndExtractPlugin } from '../lib/plugin-tarball.js';
 import { readSyncState, updateSyncState } from '../lib/sync-state.js';
@@ -127,6 +128,9 @@ export async function runPluginRefresh(
     mkdirSync(tmpExtractDir, { recursive: true });
 
     await fetchAndExtractPlugin(ctx, meta, tmpTarballPath, tmpExtractDir);
+    // Byte-accurate: read the contract version from the bytes we just extracted
+    // (not the server response), so what we record == what's actually installed.
+    const installedContractVersion = readInstalledPluginContractVersion(tmpExtractDir);
     const plugins = listMarketplacePluginsFromExtractDir(tmpExtractDir);
     mkdirSync(join(tmpMarketplaceDir, '.claude-plugin'), { recursive: true });
     writeFileSync(
@@ -192,6 +196,7 @@ export async function runPluginRefresh(
       ctx.rootDir,
       (s) => {
         s.installedPluginVersion = meta.version;
+        s.installedPluginContractVersion = installedContractVersion;
         s.lastClaudeBinPath = claudeBin;
       },
       { retries: 10 }

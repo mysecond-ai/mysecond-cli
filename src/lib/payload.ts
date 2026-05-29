@@ -62,6 +62,10 @@ export interface CliSyncResponse {
   // last). Absent when the server predates Track B or for legacy API keys with
   // no member identity — sync degrades gracefully to leaving the block as-is.
   resolved_imports?: string[];
+  // Latest curated plugin contract version (server code constant). Absent when
+  // the app predates this feature → the CLI no-ops the plugin-refresh nudge.
+  // Compared against sync-state.installedPluginContractVersion.
+  latest_plugin_contract_version?: string;
 }
 
 export interface ArtifactPayload {

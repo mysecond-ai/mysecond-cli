@@ -22,6 +22,7 @@ import { emitTelemetry, pluginTarball } from '../api.js';
 import { atomicRenameDir } from '../atomic-write.js';
 import { resolveClaudeBin } from '../claude-bin.js';
 import { staleCacheBanner } from '../copy.js';
+import { readInstalledPluginContractVersion } from '../plugin-meta.js';
 import { MysecondError } from '../errors.js';
 import {
   cacheLastKnownGood,
@@ -540,6 +541,12 @@ async function doStep9(
   // cached version and intentionally leaves this null, so a future refresh
   // upgrades the customer off that stale cache rather than recording it as current.
   state.installedPluginVersion = meta.version;
+  // Byte-accurate contract version from the just-installed plugin's _meta.json
+  // (same normal-success path as installedPluginVersion; LKG fallback leaves it
+  // null so a future refresh self-heals). Powers the plugin-refresh nudge.
+  state.installedPluginContractVersion = readInstalledPluginContractVersion(
+    join(marketplaceDir(slug), 'plugin')
+  );
   state.step9Auth401RetryCount = 0;
   writeSyncState(ctx.rootDir, state);
 

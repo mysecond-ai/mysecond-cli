@@ -92,6 +92,7 @@ export async function cliSync(
     timeoutMs?: number;
     clientBasePluginVersion?: string | null;
     teamId?: string | null;
+    clientPluginContractVersion?: string | null;
   } = {}
 ): Promise<CliSyncResponse> {
   const query: Record<string, string | undefined> = {};
@@ -113,6 +114,12 @@ export async function cliSync(
   // and the server treats that as "fully behind".
   if (opts.clientBasePluginVersion) {
     query['client_base_plugin_version'] = opts.clientBasePluginVersion;
+  }
+  // Report the plugin contract version we have installed (read from the
+  // installed _meta.json) so the server can log fleet visibility. Truthy guard
+  // mirrors the others — omit when null so we never send an empty param.
+  if (opts.clientPluginContractVersion) {
+    query['client_plugin_contract_version'] = opts.clientPluginContractVersion;
   }
   const response = await companionFetch(ctx, '/api/companion/cli-sync', {
     query,

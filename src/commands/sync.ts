@@ -33,6 +33,7 @@ import {
   maybePrintUpgradeNag,
   shouldRunNpmUpdate,
 } from '../lib/npm.js';
+import { maybePrintPluginRefreshNudge } from '../lib/plugin-refresh-nag.js';
 import {
   scanArtifacts,
   scanContextFiles,
@@ -797,6 +798,7 @@ export async function runSync(
       ...cliSyncOpts,
       clientBasePluginVersion: installState.base_plugin_version,
       teamId: readTeamIdFromCreds(ctx.rootDir),
+      clientPluginContractVersion: state.installedPluginContractVersion,
     });
   } catch (err) {
     const httpCode = err instanceof MysecondError ? err.exitCode : -1;
@@ -982,6 +984,17 @@ export async function runSync(
   // Called AFTER the writeSyncState above so the same persist isn't done
   // twice in the common (no-nag) case.
   maybePrintUpgradeNag(state, ctx.rootDir);
+
+  // Plugin-refresh nudge (separate axis from the npm nag above): one stdout line
+  // (SessionStart-hook stdout → the model's session-start context, which it
+  // relays; stderr would be dropped) when the installed plugin's contract version
+  // is behind the latest the server returned. Self-persisting + 24h-debounced;
+  // reuses MYSECOND_NO_UPGRADE_NAG.
+  maybePrintPluginRefreshNudge(
+    state,
+    ctx.rootDir,
+    response.latest_plugin_contract_version ?? null
+  );
 
   // Self-heal the "duplicate skills" bug (Finding #2) for EXISTING customers.
   // step-9 (plugin install) is skipped on re-runs once the init ledger is

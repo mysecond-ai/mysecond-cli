@@ -70,6 +70,17 @@ export interface SyncState {
   // available version against this to decide whether a re-install is needed.
   // Null on installs that predate this field → treated as "refresh once".
   installedPluginVersion: string | null;
+  // Curated plugin CONTRACT version (PLUGIN_CONTRACT_VERSION) baked into the
+  // plugin the CLI ACTUALLY installed — read back from the installed plugin's
+  // _meta.json by step-9 and `plugin-refresh` (byte-accurate). Compared against
+  // the latest contract version returned by cli-sync to decide whether to nudge
+  // the user to run `plugin-refresh`. Null on pre-feature installs (→ nudged
+  // once/day until they refresh) or when the server didn't embed one.
+  installedPluginContractVersion: string | null;
+  // Debounces the plugin-refresh nudge (24h), separate from `lastUpgradePromptAt`
+  // (which debounces the npm CLI-upgrade nag) so the two notices don't suppress
+  // each other.
+  lastPluginRefreshPromptAt: string | null;
 }
 
 function freshEmptyState(): SyncState {
@@ -88,6 +99,8 @@ function freshEmptyState(): SyncState {
     lastUpgradePromptAt: null,
     lastClaudeBinPath: null,
     installedPluginVersion: null,
+    installedPluginContractVersion: null,
+    lastPluginRefreshPromptAt: null,
   };
 }
 
