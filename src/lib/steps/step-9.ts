@@ -534,6 +534,12 @@ async function doStep9(
   // plain-terminal context (where $CLAUDE_CODE_EXECPATH is unset) can still
   // resolve the binary. Counter was already cleared post-fetch; keep it 0.
   state.lastClaudeBinPath = claudeBin;
+  // Record the version Claude Code actually has materialized (Codex #3) so a
+  // later `mysecond plugin-refresh` can tell whether a re-install is needed.
+  // Set ONLY on this normal-success path: an LKG fallback installs a STALE
+  // cached version and intentionally leaves this null, so a future refresh
+  // upgrades the customer off that stale cache rather than recording it as current.
+  state.installedPluginVersion = meta.version;
   state.step9Auth401RetryCount = 0;
   writeSyncState(ctx.rootDir, state);
 

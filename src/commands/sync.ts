@@ -48,7 +48,14 @@ import {
   spliceBetweenMarkers,
 } from '../lib/copy.js';
 import { pruneStalePlugins } from '../lib/prune-stale-plugins.js';
-import { readSyncState, writeSyncState, type SyncState } from '../lib/sync-state.js';
+import {
+  readSyncState,
+  updateSyncState,
+  writeSyncState,
+  type SyncState,
+  type SyncStateArtifactEntry,
+  type SyncStateContextEntry,
+} from '../lib/sync-state.js';
 
 const TEAM_OVERRIDE_START = '<!-- TEAM_OVERRIDE:START -->';
 const TEAM_OVERRIDE_END = '<!-- TEAM_OVERRIDE:END -->';
@@ -632,6 +639,97 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
   return failed ? 1 : 0;
 }
 
+/**
+ * `mysecond sync --push-only` — the once-per-turn realtime push used by the
+ * Stop / SubagentStop hook. Scans local artifacts + context files and pushes
+ * only those whose hash changed since the last recorded push (incremental —
+ * the same hash-gating as the SessionStart up-sync). It does NOT pull,
+ * reconcile, touch CLAUDE.md, pull base-plugin updates, or run the npm-nag —
+ * those belong to the full SessionStart sync, not every turn.
+ *
+ * It persists ONLY the keys it actually pushed, via the locked updateSyncState,
+ * so it never clobbers a concurrent PostToolUse `artifact-sync` write.
+ *
+ * Best-effort + silent-safe: a push failure is swallowed under --silent (the
+ * hook path) and surfaced in interactive mode; the command always returns 0.
+ */
+async function runPushOnly(ctx: CommandContext): Promise<number> {
+  const state = readSyncState(ctx.rootDir);
+  const opts = silentSyncOpts(ctx);
+
+  const pushedArtifacts: Record<string, SyncStateArtifactEntry> = {};
+  const pushedContext: Record<string, SyncStateContextEntry> = {};
+
+  // Artifacts (work outputs). scanArtifacts is hardened (size-capped + skips
+  // unreadable files) so a single bad file can't fail the whole turn sweep.
+  try {
+    const artifacts = scanArtifacts(ctx.rootDir);
+    const toSync = artifacts.filter((a) => {
+      const last = state.artifacts[a.file_path];
+      return !last || last.hash !== a.current_hash;
+    });
+    if (toSync.length > 0) {
+      const res = await artifactsSync(ctx, toSync, opts);
+      if (res.synced > 0) {
+        const now = new Date().toISOString();
+        for (const a of toSync) {
+          pushedArtifacts[a.file_path] = { hash: a.current_hash, pushedAt: now };
+        }
+      }
+    }
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: artifact push-only failed (${err instanceof Error ? err.message : String(err)}).\n`
+      );
+    }
+  }
+
+  // Context files.
+  try {
+    const files = scanContextFiles(ctx.rootDir);
+    const toSync = files.filter((f) => {
+      const last = state.contextFiles[f.file_path];
+      return !last || last.hash !== f.current_hash;
+    });
+    if (toSync.length > 0) {
+      const res = await contextFilesPush(ctx, toSync, opts);
+      if (res.synced > 0 || res.skipped > 0) {
+        const now = new Date().toISOString();
+        for (const f of toSync) {
+          pushedContext[f.file_path] = { hash: f.current_hash, pushedAt: now };
+        }
+      }
+    }
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: context push-only failed (${err instanceof Error ? err.message : String(err)}).\n`
+      );
+    }
+  }
+
+  const artifactCount = Object.keys(pushedArtifacts).length;
+  const contextCount = Object.keys(pushedContext).length;
+  if (artifactCount > 0 || contextCount > 0) {
+    // Persist ONLY the keys we pushed, merged onto a freshly-read state under
+    // lock — never overwrite hashes a concurrent writer recorded.
+    await updateSyncState(ctx.rootDir, (s) => {
+      Object.assign(s.artifacts, pushedArtifacts);
+      Object.assign(s.contextFiles, pushedContext);
+    });
+    // stdout so Claude (which reads hook stdout as context) can note the sync.
+    // Emitted only when something was actually pushed — the common no-change
+    // turn stays silent.
+    const parts: string[] = [];
+    if (artifactCount > 0) parts.push(`${artifactCount} artifact(s)`);
+    if (contextCount > 0) parts.push(`${contextCount} context file(s)`);
+    process.stdout.write(`mysecond: pushed ${parts.join(' + ')}.\n`);
+  }
+
+  return 0;
+}
+
 export async function runSync(
   _args: readonly string[],
   ctx: CommandContext
@@ -645,6 +743,13 @@ export async function runSync(
   // standalone repair, not part of the normal pull flow.
   if (ctx.pushAll) {
     return runPushAll(ctx);
+  }
+
+  // `--push-only`: the once-per-turn realtime up-sync used by the Stop /
+  // SubagentStop hook. Incremental (changed files only) and standalone — no
+  // pull. Return early so a turn-end push never triggers a full re-pull.
+  if (ctx.pushOnly) {
+    return runPushOnly(ctx);
   }
 
   maybeNudgeCredsMigration(ctx);

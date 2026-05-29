@@ -1,7 +1,8 @@
 // .claude/sync-state.json — read/write the local sync ledger.
 
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import lockfile from 'proper-lockfile';
 
 import { atomicWriteFile } from './atomic-write.js';
 import { projectPaths } from './files.js';
@@ -61,6 +62,14 @@ export interface SyncState {
   // still resolve the binary instead of falling through to PATH lookups that
   // fail on desktop-app installs.
   lastClaudeBinPath: string | null;
+  // Plugin version (the `1.{unix-ms}.0` minted by regen) that Claude Code
+  // currently has MATERIALIZED for this customer. Written by step-9 and
+  // `plugin-refresh` to the version they ACTUALLY installed — which may be an
+  // older last-known-good cache on a network/registration failure, never
+  // blindly the latest available. `plugin-refresh` compares the latest
+  // available version against this to decide whether a re-install is needed.
+  // Null on installs that predate this field → treated as "refresh once".
+  installedPluginVersion: string | null;
 }
 
 function freshEmptyState(): SyncState {
@@ -78,6 +87,7 @@ function freshEmptyState(): SyncState {
     lastKnownLatestNpmVersion: null,
     lastUpgradePromptAt: null,
     lastClaudeBinPath: null,
+    installedPluginVersion: null,
   };
 }
 
@@ -129,4 +139,69 @@ export function writeSyncState(rootDir: string, state: SyncState): void {
   // mkdirSync recursive is a no-op if the directory exists.
   mkdirSync(dirname(path), { recursive: true });
   atomicWriteFile(path, JSON.stringify(state, null, 2) + '\n');
+}
+
+// Lock tuning for sync-state writes — mirror marketplace-lock's proven values.
+const SYNC_STATE_LOCK_STALE_MS = 30_000;
+const SYNC_STATE_LOCK_RETRIES = 5;
+const SYNC_STATE_LOCK_MIN_TIMEOUT_MS = 100;
+
+/**
+ * Read-modify-write sync-state.json under a file lock so concurrent writers
+ * don't clobber each other. `writeSyncState` replaces the WHOLE file, so two
+ * writers that each `read → mutate → write` can lose one another's keys: the
+ * PostToolUse `artifact-sync` hook (records one context-file hash) and the Stop
+ * `sync --push-only` sweep (records many artifact/context hashes) fire close
+ * together, and without serialization the later write would drop the earlier
+ * one's freshly-recorded hash (→ a benign but wasteful re-push next turn). The
+ * mutator runs against state read FRESH under the lock, so it only ever adds to
+ * the latest on-disk state.
+ *
+ * Best-effort by contract: hooks must never crash on lock contention. If the
+ * lock can't be acquired (timeout, unsupported FS), we fall back to an unlocked
+ * read-modify-write — no worse than the pre-lock behavior, and the common
+ * (uncontended) case is fully serialized.
+ */
+export async function updateSyncState(
+  rootDir: string,
+  mutate: (state: SyncState) => void
+): Promise<void> {
+  const path = projectPaths(rootDir).syncStatePath;
+  mkdirSync(dirname(path), { recursive: true });
+  // proper-lockfile requires the target to exist before lock(). A brand-new
+  // workspace may not have written sync-state yet; materialize an empty one so
+  // the very first concurrent writers still serialize.
+  if (!existsSync(path)) {
+    atomicWriteFile(path, JSON.stringify(freshEmptyState(), null, 2) + '\n');
+  }
+
+  let release: (() => Promise<void>) | null = null;
+  try {
+    release = await lockfile.lock(path, {
+      retries: {
+        retries: SYNC_STATE_LOCK_RETRIES,
+        minTimeout: SYNC_STATE_LOCK_MIN_TIMEOUT_MS,
+      },
+      stale: SYNC_STATE_LOCK_STALE_MS,
+    });
+  } catch {
+    // Couldn't acquire the lock — degrade to an unlocked read-modify-write.
+    // Never throw from here: this path serves best-effort hook writes.
+    const state = readSyncState(rootDir);
+    mutate(state);
+    writeSyncState(rootDir, state);
+    return;
+  }
+
+  try {
+    const state = readSyncState(rootDir);
+    mutate(state);
+    writeSyncState(rootDir, state);
+  } finally {
+    try {
+      await release();
+    } catch {
+      // Lock auto-releases after the stale window; ignore release errors.
+    }
+  }
 }

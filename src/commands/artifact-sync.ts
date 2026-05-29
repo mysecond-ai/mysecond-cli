@@ -19,7 +19,7 @@ import {
   type ArtifactPayload,
   type ContextFilePayload,
 } from '../lib/payload.js';
-import { readSyncState, writeSyncState } from '../lib/sync-state.js';
+import { updateSyncState } from '../lib/sync-state.js';
 
 interface ToolEvent {
   tool_name?: string;
@@ -116,9 +116,12 @@ export async function runArtifactSync(
       // record it so SessionStart can de-dupe). Pure-error response leaves
       // state untouched so the next SessionStart up-loop retries.
       if (result.synced > 0 || result.skipped > 0) {
-        const state = readSyncState(ctx.rootDir);
-        state.contextFiles[relativePath] = { hash, pushedAt: new Date().toISOString() };
-        writeSyncState(ctx.rootDir, state);
+        // Locked read-modify-write: this PostToolUse write can race the Stop
+        // `sync --push-only` sweep; updateSyncState serializes + re-reads so
+        // neither writer clobbers the other's hashes.
+        await updateSyncState(ctx.rootDir, (state) => {
+          state.contextFiles[relativePath] = { hash, pushedAt: new Date().toISOString() };
+        });
       }
     } catch (err) {
       // Honor server-side halt header: if the server flipped the rollback-pause
