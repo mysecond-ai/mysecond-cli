@@ -670,7 +670,12 @@ async function runPushOnly(ctx: CommandContext): Promise<number> {
     });
     if (toSync.length > 0) {
       const res = await artifactsSync(ctx, toSync, opts);
-      if (res.synced > 0) {
+      // Record hashes ONLY on a full accept. The artifacts response carries
+      // just { synced } (no per-file errors), so a partial accept
+      // (synced < count) must not mark un-accepted files as pushed — that would
+      // suppress retry until the file changes again. On a partial/failed push
+      // we record nothing and the next turn retries.
+      if (res.synced >= toSync.length) {
         const now = new Date().toISOString();
         for (const a of toSync) {
           pushedArtifacts[a.file_path] = { hash: a.current_hash, pushedAt: now };
@@ -694,7 +699,12 @@ async function runPushOnly(ctx: CommandContext): Promise<number> {
     });
     if (toSync.length > 0) {
       const res = await contextFilesPush(ctx, toSync, opts);
-      if (res.synced > 0 || res.skipped > 0) {
+      // Record only on a clean accept (no per-file errors). synced + skipped =
+      // accepted (new/updated + already-current); a non-empty errors[] means
+      // the server rejected some, so record nothing and retry next turn rather
+      // than marking a rejected file as pushed.
+      const errs = res.errors ?? [];
+      if (errs.length === 0 && (res.synced > 0 || res.skipped > 0)) {
         const now = new Date().toISOString();
         for (const f of toSync) {
           pushedContext[f.file_path] = { hash: f.current_hash, pushedAt: now };

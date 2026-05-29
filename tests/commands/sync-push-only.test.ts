@@ -5,7 +5,7 @@
 // --push-all it is hash-gated (only CHANGED files push). It is best-effort:
 // always exits 0, persists only the keys it actually pushed.
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,5 +136,48 @@ describe('mysecond sync --push-only', () => {
     const code = await runSync([], ctx(root));
     expect(code).toBe(0);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  function recordedSection(root: string, key: 'artifacts' | 'contextFiles'): Record<string, unknown> {
+    const statePath = join(root, '.claude/sync-state.json');
+    if (!existsSync(statePath)) return {};
+    return (JSON.parse(readFileSync(statePath, 'utf8'))[key] ?? {}) as Record<string, unknown>;
+  }
+
+  // Codex review #3: a partial server accept must NOT record un-accepted files
+  // as pushed (the artifacts response has no per-file info, so synced < count
+  // means we can't tell which were rejected → record none, retry next turn).
+  it('does NOT record artifact hashes on a partial accept (synced < count)', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'work/specs/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/specs/outputs/a.md'), 'aaa');
+    writeFileSync(join(root, 'work/specs/outputs/b.md'), 'bbb');
+    fetchMock.mockImplementation((url: URL) => {
+      if (url.pathname === '/api/companion/artifacts') return Promise.resolve(jsonResponse({ synced: 1 }));
+      throw new Error(`unexpected fetch to ${url.pathname}`);
+    });
+
+    const code = await runSync([], ctx(root));
+    expect(code).toBe(0);
+    // Neither file recorded → both retry next turn (no false "pushed").
+    expect(recordedSection(root, 'artifacts')).toEqual({});
+  });
+
+  it('does NOT record context hashes when the server returns per-file errors', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'company');
+    fetchMock.mockImplementation((url: URL) => {
+      if (url.pathname === '/api/companion/files') {
+        return Promise.resolve(
+          jsonResponse({ synced: 0, skipped: 0, errors: ['rejected: context/company.md'] }),
+        );
+      }
+      throw new Error(`unexpected fetch to ${url.pathname}`);
+    });
+
+    const code = await runSync([], ctx(root));
+    expect(code).toBe(0);
+    expect(recordedSection(root, 'contextFiles')).toEqual({});
   });
 });

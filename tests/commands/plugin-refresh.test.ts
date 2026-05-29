@@ -18,7 +18,7 @@ const h = vi.hoisted(() => ({
   listPlugins: vi.fn(),
   registerMarketplaceAndInstall: vi.fn(),
   cacheLastKnownGood: vi.fn(),
-  atomicRenameDir: vi.fn(),
+  acquireMarketplaceLock: vi.fn(),
   marketplaceDir: vi.fn(),
   marketplaceTmpDir: vi.fn(),
   marketplaceTmpJsonPath: vi.fn(),
@@ -32,7 +32,7 @@ vi.mock('../../src/lib/plugin-register.js', () => ({
 }));
 vi.mock('../../src/lib/last-known-good.js', () => ({ cacheLastKnownGood: h.cacheLastKnownGood }));
 vi.mock('../../src/lib/marketplace-lock.js', () => ({
-  acquireMarketplaceLock: vi.fn(async () => ({ release: vi.fn(async () => {}) })),
+  acquireMarketplaceLock: h.acquireMarketplaceLock,
 }));
 vi.mock('../../src/lib/mysecond-paths.js', async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -91,13 +91,13 @@ beforeEach(() => {
     h.listPlugins,
     h.registerMarketplaceAndInstall,
     h.cacheLastKnownGood,
-    h.atomicRenameDir,
+    h.acquireMarketplaceLock,
   ]) {
     fn.mockReset();
   }
   h.fetchAndExtractPlugin.mockResolvedValue(undefined);
   h.listPlugins.mockReturnValue([{ name: 'pm-os' }]);
-  h.atomicRenameDir.mockReturnValue(undefined);
+  h.acquireMarketplaceLock.mockResolvedValue({ release: async () => {} });
 
   // Redirect all marketplace paths into a fresh temp dir.
   mpDir = mkdtempSync(join(tmpdir(), 'mysecond-mp-'));
@@ -187,5 +187,31 @@ describe('mysecond plugin-refresh', () => {
     const code = await runPluginRefresh([], ctx(root, { apiKey: '' }));
     expect(code).toBe(0);
     expect(h.pluginTarball).not.toHaveBeenCalled();
+  });
+
+  // Codex review #1: acquireMarketplaceLock throws on contention — must not
+  // make the command exit non-zero.
+  it('degradable: exit 0 (no register) when the marketplace lock cannot be acquired', async () => {
+    const root = tmpProject('acme', '1.100.0');
+    h.pluginTarball.mockResolvedValue({ version: '1.200.0', sha256: 'abc' });
+    h.acquireMarketplaceLock.mockRejectedValue(new Error('lock busy'));
+    const code = await runPluginRefresh([], ctx(root));
+    expect(code).toBe(0);
+    expect(h.registerMarketplaceAndInstall).not.toHaveBeenCalled();
+    expect(readSyncState(root).installedPluginVersion).toBe('1.100.0');
+  });
+
+  // Codex review #5: a best-effort LKG cache write failure after a successful
+  // install must not lose the recorded version nor exit non-zero.
+  it('records the installed version even when last-known-good caching throws', async () => {
+    const root = tmpProject('acme', '1.100.0');
+    h.pluginTarball.mockResolvedValue({ version: '1.200.0', sha256: 'abc' });
+    h.registerMarketplaceAndInstall.mockReturnValue({ outcome: { kind: 'registered' }, failedPlugins: [] });
+    h.cacheLastKnownGood.mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const code = await runPluginRefresh([], ctx(root));
+    expect(code).toBe(0);
+    expect(readSyncState(root).installedPluginVersion).toBe('1.200.0');
   });
 });

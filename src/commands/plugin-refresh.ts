@@ -15,11 +15,10 @@
 // The only durable change on success is re-installing the latest plugin and
 // recording installedPluginVersion.
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { pluginTarball } from '../lib/api.js';
-import { atomicRenameDir } from '../lib/atomic-write.js';
 import { resolveClaudeBin } from '../lib/claude-bin.js';
 import type { CommandContext } from '../lib/context.js';
 import { cacheLastKnownGood } from '../lib/last-known-good.js';
@@ -35,7 +34,6 @@ import {
   marketplaceTmpJsonPath,
   pluginTmpExtractDir,
   validateSlug,
-  type PluginEntry,
 } from '../lib/mysecond-paths.js';
 import { registerMarketplaceAndInstall } from '../lib/plugin-register.js';
 import { fetchAndExtractPlugin } from '../lib/plugin-tarball.js';
@@ -101,39 +99,58 @@ export async function runPluginRefresh(
 
   const claudeBin = resolveClaudeBin({ persistedPath: state.lastClaudeBinPath }).path;
 
-  // Serialize against init / other refreshes — this mutates the shared
-  // marketplace dir.
-  const lock = await acquireMarketplaceLock();
+  // Serialize against init / other refreshes (this mutates the shared
+  // marketplace dir). acquireMarketplaceLock THROWS on contention/FS error, so
+  // guard it — the command must stay best-effort / exit 0. If another mysecond
+  // process holds the lock, skip; a later run retries.
+  let lock: { release: () => Promise<void> };
   try {
-    // Materialize the latest tarball into the marketplace dir (mirror step-9
-    // sub-steps b–e). Single attempt: on ANY failure we restore nothing and
-    // leave the existing install in place (no LKG fallback — unlike first
-    // install, a failed refresh isn't stranding; the old plugin still works).
+    lock = await acquireMarketplaceLock();
+  } catch {
+    if (!ctx.silent) {
+      process.stderr.write(
+        'mysecond: another mysecond process is busy; skipping plugin refresh (will retry later).\n'
+      );
+    }
+    return 0;
+  }
+
+  const tmpMarketplaceDir = marketplaceTmpDir(slug);
+  try {
+    // Materialize the latest tarball (mirror step-9 sub-steps b–e). No LKG
+    // fallback — unlike first install, a failed refresh isn't stranding: the
+    // already-installed plugin keeps working, so on ANY failure (outer catch)
+    // we leave it untouched and exit 0.
     const tmpExtractDir = pluginTmpExtractDir(slug);
-    const tmpMarketplaceDir = marketplaceTmpDir(slug);
     const tmpTarballPath = join(tmpMarketplaceDir, 'plugin.tgz');
     rmSync(tmpMarketplaceDir, { recursive: true, force: true });
     mkdirSync(tmpExtractDir, { recursive: true });
 
-    let plugins: PluginEntry[];
+    await fetchAndExtractPlugin(ctx, meta, tmpTarballPath, tmpExtractDir);
+    const plugins = listMarketplacePluginsFromExtractDir(tmpExtractDir);
+    mkdirSync(join(tmpMarketplaceDir, '.claude-plugin'), { recursive: true });
+    writeFileSync(
+      marketplaceTmpJsonPath(slug),
+      serializeMarketplaceJson(buildMarketplaceJson(slug, plugins))
+    );
+
+    // Safe swap — NOT atomicRenameDir, which rm's the destination BEFORE the
+    // rename and would destroy the customer's working marketplace source if the
+    // rename then failed. Move the old dir aside, move the new one in, drop the
+    // old — and restore the old if the rename fails. The marketplace dir is
+    // never left missing. All paths share a parent, so renameSync is atomic.
+    const finalDir = marketplaceDir(slug);
+    const backupDir = `${finalDir}.bak-${process.pid}`;
+    const hadExisting = existsSync(finalDir);
+    rmSync(backupDir, { recursive: true, force: true });
+    if (hadExisting) renameSync(finalDir, backupDir);
     try {
-      await fetchAndExtractPlugin(ctx, meta, tmpTarballPath, tmpExtractDir);
-      plugins = listMarketplacePluginsFromExtractDir(tmpExtractDir);
-      mkdirSync(join(tmpMarketplaceDir, '.claude-plugin'), { recursive: true });
-      writeFileSync(
-        marketplaceTmpJsonPath(slug),
-        serializeMarketplaceJson(buildMarketplaceJson(slug, plugins))
-      );
-      atomicRenameDir(tmpMarketplaceDir, marketplaceDir(slug));
-    } catch (err) {
-      rmSync(tmpMarketplaceDir, { recursive: true, force: true });
-      if (!ctx.silent) {
-        process.stderr.write(
-          `mysecond: couldn't download the latest plugin (${err instanceof Error ? err.message : String(err)}). Your current install is unchanged.\n`
-        );
-      }
-      return 0;
+      renameSync(tmpMarketplaceDir, finalDir);
+    } catch (renameErr) {
+      if (hadExisting) renameSync(backupDir, finalDir);
+      throw renameErr;
     }
+    if (hadExisting) rmSync(backupDir, { recursive: true, force: true });
 
     // Re-register with Claude Code via the shared mechanics helper.
     const result = registerMarketplaceAndInstall({
@@ -145,8 +162,9 @@ export async function runPluginRefresh(
     });
 
     if (result.outcome.kind !== 'registered') {
-      // Degraded: the previously-installed plugin is still present + working.
-      // Do NOT advance installedPluginVersion, so a later run retries.
+      // Degraded: the marketplace dir now holds the new tree but Claude Code
+      // didn't (re)install it. The previously-installed cached plugin still
+      // works. Do NOT advance installedPluginVersion, so a later run retries.
       if (!ctx.silent) {
         const why =
           result.outcome.kind === 'binary_not_found'
@@ -161,13 +179,18 @@ export async function runPluginRefresh(
       return 0;
     }
 
-    // Success — cache as last-known-good + record the version ACTUALLY installed
-    // (the latest we just fetched + registered), under the locked writer.
-    cacheLastKnownGood(slug, meta.version, meta.sha256, join(marketplaceDir(slug), 'plugin'));
+    // Record the version ACTUALLY installed FIRST (the durable, important
+    // persist), THEN cache last-known-good best-effort — a cache write failure
+    // must not make a successful refresh exit non-zero or lose the version.
     await updateSyncState(ctx.rootDir, (s) => {
       s.installedPluginVersion = meta.version;
       s.lastClaudeBinPath = claudeBin;
     });
+    try {
+      cacheLastKnownGood(slug, meta.version, meta.sha256, join(finalDir, 'plugin'));
+    } catch {
+      // best-effort cache; the refresh already succeeded + recorded the version.
+    }
 
     if (!ctx.silent) {
       process.stdout.write(
@@ -176,7 +199,17 @@ export async function runPluginRefresh(
       );
     }
     return 0;
+  } catch (err) {
+    // Any unexpected failure (download, swap, register, persist) — clean up tmp,
+    // leave the working install in place, exit 0. Refresh is best-effort.
+    rmSync(tmpMarketplaceDir, { recursive: true, force: true });
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: plugin refresh didn't complete (${err instanceof Error ? err.message : String(err)}). Your current install is unchanged.\n`
+      );
+    }
+    return 0;
   } finally {
-    await lock.release();
+    await lock.release().catch(() => {});
   }
 }

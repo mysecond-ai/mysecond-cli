@@ -185,11 +185,11 @@ export async function updateSyncState(
       stale: SYNC_STATE_LOCK_STALE_MS,
     });
   } catch {
-    // Couldn't acquire the lock — degrade to an unlocked read-modify-write.
-    // Never throw from here: this path serves best-effort hook writes.
-    const state = readSyncState(rootDir);
-    mutate(state);
-    writeSyncState(rootDir, state);
+    // Couldn't acquire the lock (contention or an unsupported FS). SKIP the
+    // write rather than doing an UNLOCKED read-modify-write: an unlocked writer
+    // could clobber a concurrent locked writer's keys (the very thing this
+    // helper exists to prevent). These are best-effort hook writes — the
+    // mutation is simply re-done on the next turn / SessionStart.
     return;
   }
 
