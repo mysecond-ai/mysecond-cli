@@ -1032,17 +1032,6 @@ export async function runSync(
   // twice in the common (no-nag) case.
   maybePrintUpgradeNag(state, ctx.rootDir);
 
-  // Plugin-refresh nudge: resolve the text now (this persists the 24h debounce
-  // stamp + honors force/silence), but DON'T emit here — printSummary emits it
-  // below on the right channel. In the SessionStart hook (silent) it rides in the
-  // hook JSON's top-level `systemMessage`, which Claude Code shows to the USER
-  // directly (plain stdout → additionalContext, which the user never reliably sees).
-  const pluginRefreshNudge = resolvePluginRefreshNudge(
-    state,
-    ctx.rootDir,
-    response.latest_plugin_contract_version ?? null
-  );
-
   // Self-heal the "duplicate skills" bug (Finding #2) for EXISTING customers.
   // step-9 (plugin install) is skipped on re-runs once the init ledger is
   // complete, so a customer who onboarded during the 2026-05-04→05
@@ -1074,6 +1063,23 @@ export async function runSync(
   if (wasFirstSync) {
     await confirmFirstSetup(ctx);
   }
+
+  // Plugin-refresh nudge — resolved LAST, immediately before printSummary emits
+  // it. resolvePluginRefreshNudge persists the 24h debounce stamp as a side
+  // effect, so it MUST sit adjacent to the emission. Resolving it earlier (before
+  // the best-effort pruneStalePlugins, which can block for minutes on `claude
+  // plugin uninstall` subprocesses) opened a window where a SessionStart-hook
+  // timeout could kill the process AFTER the stamp was written but BEFORE the
+  // nudge was shown — suppressing it for 24h with the user never seeing it
+  // (Codex P2). Now a kill during the slow cleanup persists neither, so the next
+  // session simply re-nudges. In the silent hook the nudge rides in the hook
+  // JSON's top-level `systemMessage` (user-visible); plain stdout becomes
+  // additionalContext, which the user never reliably sees.
+  const pluginRefreshNudge = resolvePluginRefreshNudge(
+    state,
+    ctx.rootDir,
+    response.latest_plugin_contract_version ?? null
+  );
 
   printSummary(summary, ctx, pluginRefreshNudge);
   return 0;
