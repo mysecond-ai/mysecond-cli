@@ -6,9 +6,13 @@
 // CLAUDE.md @import breadcrumb) deferred until customer feedback demands it.
 //
 // CAIO finding (PR 4b review): stderr from SessionStart hooks is silently
-// dropped on exit 0. Conflict notifications must go to STDOUT in --silent mode
-// so Claude sees them as session-start context and can mention them to the
-// customer. TTY (terminal) keeps stderr where it's visible directly.
+// dropped on exit 0, so conflict notices must reach Claude via the hook's
+// stdout. But that stdout has to be a SINGLE JSON object (it now carries the
+// user-facing plugin-refresh nudge in `systemMessage`), so in --silent mode the
+// notices are collected into a sink and folded into the hook JSON's
+// `additionalContext` by printSummary — NOT written to stdout directly (a bare
+// line would corrupt the JSON and drop the nudge). TTY mode keeps stderr, where
+// the customer sees them directly. See `emitNotice`.
 
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -79,14 +83,29 @@ function recordSyncedFile(
   };
 }
 
-function emitNotice(message: string, ctx: CommandContext): void {
-  // CAIO: stdout in silent mode (SessionStart hook) so Claude reads it as
-  // session-start context. Stderr in TTY mode where the customer sees it.
+function emitNotice(message: string, ctx: CommandContext, sink?: string[]): void {
+  // In silent mode (SessionStart hook) the hook's stdout must be a SINGLE JSON
+  // object — printSummary emits it, routing the user-facing plugin-refresh nudge
+  // to the top-level `systemMessage`. A bare plain-text line here would corrupt
+  // that payload (stdout would no longer parse as one JSON object) and the nudge
+  // would be silently dropped. So collect the notice into the caller's sink;
+  // printSummary folds it into the hook JSON's `additionalContext` — the SAME
+  // model-relayed audience these notices had before (silent stdout → context).
+  // In TTY mode there's no JSON envelope, so write straight to stderr where the
+  // customer sees it directly. The silent-without-sink branch is a safe fallback
+  // (no current caller hits it; resolveConflict's sole caller passes a sink).
+  if (ctx.silent && sink) {
+    sink.push(message);
+    return;
+  }
   const stream = ctx.silent ? process.stdout : process.stderr;
   stream.write(message + '\n');
 }
 
-export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
+export function resolveConflict(
+  input: SyncContextFileInput,
+  notices?: string[]
+): ConflictOutcome {
   const { file, localContent, syncState, ctx } = input;
   const { conflictsDir } = projectPaths(ctx.rootDir);
   const nowIso = new Date().toISOString();
@@ -141,7 +160,8 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
     writeLocalFile(conflictsDir, `${safeName}-cloud-${stamp}.md`, file.content);
     emitNotice(
       `Conflict in ${file.file_path} — skipped. Cloud version saved to ${cloudBackup}`,
-      ctx
+      ctx,
+      notices
     );
     return { kind: 'conflict-skipped' };
   }
@@ -152,7 +172,8 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
     recordSyncedFile(syncState, file.file_path, localContent, file.current_hash, nowIso);
     emitNotice(
       `Conflict in ${file.file_path} — kept local. Cloud version saved to ${cloudBackup}`,
-      ctx
+      ctx,
+      notices
     );
     return { kind: 'conflict-local-kept', backupPath: cloudBackup };
   }
@@ -166,7 +187,8 @@ export function resolveConflict(input: SyncContextFileInput): ConflictOutcome {
   recordSyncedFile(syncState, file.file_path, file.content, file.current_hash, nowIso);
   emitNotice(
     `Conflict in ${file.file_path} — kept cloud version (your local edits saved to ${localBackup})`,
-    ctx
+    ctx,
+    notices
   );
   return { kind: 'conflict-cloud-kept', writtenPath: file.file_path, backupPath: localBackup };
 }

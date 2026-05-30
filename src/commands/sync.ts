@@ -94,6 +94,12 @@ interface SyncSummary {
   // substitute for version pinning, and the signal for spotting a base-SHA
   // shift mid-workflow. Null when the server didn't return one this round.
   basePluginVersion: string | null;
+  // Per-file conflict notices collected during the down-sync. In silent mode
+  // (SessionStart hook) these are NOT written to stdout directly — that would
+  // corrupt the single hook-JSON object and drop the systemMessage nudge.
+  // printSummary folds them into `additionalContext` instead. Empty in TTY mode
+  // (there, resolveConflict writes them straight to stderr in real time).
+  conflictNotices: string[];
 }
 
 function emptySummary(): SyncSummary {
@@ -118,6 +124,7 @@ function emptySummary(): SyncSummary {
     baseWorkflowsUpdated: 0,
     baseSkippedDueToCustomization: 0,
     basePluginVersion: null,
+    conflictNotices: [],
   };
 }
 
@@ -458,6 +465,11 @@ function printSummary(
         `mysecond: ${baseParts.join(', ')} updated${baseTag} — see https://app.mysecond.ai/changelog`,
       );
     }
+    // Per-file conflict notices collected during the down-sync (resolveConflict
+    // pushed them here instead of writing stdout, so this stays one JSON object).
+    // They share additionalContext's model-relayed audience — same as before this
+    // refactor, when silent stdout became additionalContext wholesale.
+    for (const notice of summary.conflictNotices) summaryLines.push(notice);
 
     const additionalContext = summaryLines.join('\n');
     const payload: {
@@ -862,7 +874,14 @@ export async function runSync(
   // work/* and decisions/* alongside context/*).
   for (const file of contextFiles) {
     const localContent = readLocalFile(ctx.rootDir, file.file_path);
-    const outcome = resolveConflict({ file, localContent, syncState: state, ctx });
+    // Pass summary.conflictNotices as the sink: in silent mode the per-file
+    // conflict notice is collected here (folded into the hook JSON's
+    // additionalContext by printSummary) instead of being written to stdout,
+    // which would corrupt the single-JSON-object the nudge rides in.
+    const outcome = resolveConflict(
+      { file, localContent, syncState: state, ctx },
+      summary.conflictNotices
+    );
     tally(summary, outcome);
   }
 
