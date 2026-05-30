@@ -123,9 +123,16 @@ describe('plugin-refresh nudge — end-to-end via runSync', () => {
     const url = (fetchMock.mock.calls[0] as [URL, RequestInit])[0];
     expect(url.pathname).toBe('/api/companion/cli-sync');
     expect(url.searchParams.get('client_plugin_contract_version')).toBe('1');
-    // (b) the nudge reached STDOUT (the channel Claude relays at session start).
-    expect(stdoutBuf).toContain('an update to your PM OS is ready');
-    expect(stdoutBuf).toContain('plugin-refresh --force-update');
+    // (b) the nudge is emitted in the SessionStart hook JSON's top-level
+    // `systemMessage` — the ONLY channel Claude Code renders directly to the user
+    // (plain stdout → additionalContext, which the user never reliably sees).
+    const out = JSON.parse(stdoutBuf.trim()) as {
+      systemMessage?: string;
+      hookSpecificOutput?: { hookEventName?: string };
+    };
+    expect(out.hookSpecificOutput?.hookEventName).toBe('SessionStart');
+    expect(out.systemMessage).toContain('an update to your PM OS is ready');
+    expect(out.systemMessage).toContain('plugin-refresh --force-update');
   });
 
   it('stays silent when already on the latest contract version', async () => {

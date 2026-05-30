@@ -39,64 +39,64 @@ export function isPluginContractBehind(
 }
 
 /**
- * Write one STDOUT line if the installed plugin is behind the latest contract
- * version. Self-persists its own 24h debounce stamp (`lastPluginRefreshPromptAt`)
- * so a caller can't lose it. Reuses `MYSECOND_NO_UPGRADE_NAG` as the single
- * silence knob (a customer who silenced nags wants all of them silenced).
+ * Decide whether to show the plugin-refresh nudge; return its text if so, else
+ * null. Self-persists the 24h debounce stamp (`lastPluginRefreshPromptAt`) when it
+ * decides to show, and reuses `MYSECOND_NO_UPGRADE_NAG` as the single silence knob.
  *
- * STDOUT, not stderr: this runs inside `mysecond sync` (the SessionStart hook),
- * and a SessionStart hook's stdout becomes the model's session-start context —
- * which the model relays to the user. stderr on exit 0 is silently dropped (see
- * sync.ts printSummary's CAIO finding), so a stderr nudge would be invisible.
- * The 24h debounce bounds it to one line/day; separate stamp from
- * `lastUpgradePromptAt` (the npm nag) so the two notices don't suppress each other.
+ * Returns the text rather than printing it because the CALLER routes it to the
+ * right channel. In the SessionStart hook (silent) it must go in the hook JSON's
+ * TOP-LEVEL `systemMessage`, which Claude Code renders DIRECTLY to the user. Plain
+ * stdout becomes `additionalContext` — a system reminder Claude reads but the user
+ * never reliably sees (verified against the Claude Code hooks docs) — and stderr on
+ * exit 0 is dropped outright. Two earlier cuts (stderr, then stdout) were therefore
+ * invisible to customers. Separate debounce stamp from `lastUpgradePromptAt` (the
+ * npm nag) so the two notices don't suppress each other.
  */
-export function maybePrintPluginRefreshNudge(
+export function resolvePluginRefreshNudge(
   state: SyncState,
   rootDir: string,
   latestContractVersion: string | null | undefined
-): void {
-  // Test affordance: MYSECOND_FORCE_REFRESH_NUDGE=1 emits the nudge
+): string | null {
+  // Test affordance: MYSECOND_FORCE_REFRESH_NUDGE=1 returns the nudge
   // UNCONDITIONALLY (skips the behind-check, the 24h debounce, and the silence
   // flag) and does NOT mutate the debounce stamp — so the nudge can be SEEN
   // rendering in a real Claude Code session on demand, without waiting 24h or
-  // contriving versions. This is how we (or support) verify it end-to-end. See
-  // TESTING.md "Verify the plugin-refresh nudge".
+  // contriving versions. See TESTING.md "Verify the plugin-refresh nudge".
   const forced = process.env.MYSECOND_FORCE_REFRESH_NUDGE === '1';
 
   if (!forced) {
-    if (process.env.MYSECOND_NO_UPGRADE_NAG === '1') return;
+    if (process.env.MYSECOND_NO_UPGRADE_NAG === '1') return null;
     if (!isPluginContractBehind(state.installedPluginContractVersion, latestContractVersion)) {
-      return;
+      return null;
     }
     if (state.lastPluginRefreshPromptAt !== null) {
       const last = Date.parse(state.lastPluginRefreshPromptAt);
-      if (!Number.isNaN(last) && Date.now() - last < TWENTY_FOUR_HOURS_MS) return;
+      if (!Number.isNaN(last) && Date.now() - last < TWENTY_FOUR_HOURS_MS) return null;
     }
   }
 
-  // MYSECOND_NO_UPGRADE_NAG=1 still silences this (checked above) — we just don't
-  // advertise the env var in the message (cleaner for non-technical PMs; the
-  // nudge is already 24h-debounced and stops once they refresh).
-  process.stdout.write(
+  // No trailing newline + no env-var hint: this is a JSON `systemMessage` value
+  // (user-facing). We don't advertise MYSECOND_NO_UPGRADE_NAG (cleaner for
+  // non-technical PMs; the nudge is 24h-debounced and stops once they refresh).
+  const message =
     'mySecond: an update to your PM OS is ready. ' +
-      'Paste this into Claude Code to update: ' +
-      'npx -y @mysecond/cli@latest plugin-refresh --force-update ' +
-      '— then start a new session.\n'
-  );
+    'Paste this into Claude Code to update: ' +
+    'npx -y @mysecond/cli@latest plugin-refresh --force-update ' +
+    '— then start a new session.';
 
   // A forced (test) trigger must not touch the real 24h debounce state.
-  if (forced) return;
-
-  // Persist the debounce stamp (mirror maybePrintUpgradeNag): write a copy
-  // first, mutate in-memory only on success, so disk + memory stay consistent
-  // if the write fails. Best-effort — never throw.
-  const stamp = new Date().toISOString();
-  const persisted: SyncState = { ...state, lastPluginRefreshPromptAt: stamp };
-  try {
-    writeSyncState(rootDir, persisted);
-    state.lastPluginRefreshPromptAt = stamp;
-  } catch {
-    // Best-effort persistence. Leave in-memory state unchanged.
+  if (!forced) {
+    // Persist the debounce stamp: write a copy first, mutate in-memory only on
+    // success, so disk + memory stay consistent if the write fails. Best-effort.
+    const stamp = new Date().toISOString();
+    const persisted: SyncState = { ...state, lastPluginRefreshPromptAt: stamp };
+    try {
+      writeSyncState(rootDir, persisted);
+      state.lastPluginRefreshPromptAt = stamp;
+    } catch {
+      // Best-effort persistence. Leave in-memory state unchanged.
+    }
   }
+
+  return message;
 }
