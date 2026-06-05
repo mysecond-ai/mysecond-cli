@@ -185,6 +185,52 @@ export async function contextFilesPush(
   return response.body as ContextFilesResponse;
 }
 
+// Usage-tracking event payload posted by the `emit-event` hook dispatcher.
+// Wire shape matches the bash hooks it replaces (emit-event.sh /
+// emit-event-slash.sh) and the receiver at mysecond-app /api/hooks/events.
+export interface HookEventPayload {
+  event_type: 'skill_run' | 'workflow_run' | 'subagent_run' | 'session_start';
+  // null for session_start (no name); otherwise the namespace-stripped slug.
+  name: string | null;
+  session_id: string | null;
+  // null for session_start; otherwise the tool_use_id (or a synthetic
+  // `prompt-<uuid>` for typed slash commands). Server dedups on
+  // (user_id, session_id, tool_call_id) NULLS NOT DISTINCT.
+  tool_call_id: string | null;
+  cwd: string;
+  error: boolean;
+  hook_version: 'v1';
+}
+
+// POST /api/hooks/events — best-effort usage-tracking emit (team adoption
+// dashboard). Returns true on success (204, also tolerate 200), false on any
+// failure. This is the TS sibling of the curl in emit-event.sh.
+//
+// Failure policy (v1: best-effort, no retry queue — matches artifact-sync's
+// best-effort model):
+//   - 204/200            → success
+//   - 401/400            → permanent; drop (caller does NOT retry)
+//   - 429 / 5xx / network → drop for v1 (no local queue)
+// Short timeout (3s) so a slow/hung network never blocks the hook. Never
+// throws — a thrown network error is caught and reported as `false`.
+export async function emitHookEvent(
+  ctx: CommandContext,
+  payload: HookEventPayload
+): Promise<boolean> {
+  try {
+    const response = await companionFetch(ctx, '/api/hooks/events', {
+      method: 'POST',
+      body: payload,
+      timeoutMs: 3_000,
+    });
+    return response.status === 204 || response.status === 200;
+  } catch {
+    // Network/timeout (companionFetch throws MysecondError.networkUnreachable
+    // on those). Best-effort: drop, no queue.
+    return false;
+  }
+}
+
 // POST /api/setup/confirm — first-sync confirmation. Best-effort; non-critical
 // if it fails (web app reconciles on next poll).
 export async function confirmFirstSetup(ctx: CommandContext): Promise<boolean> {

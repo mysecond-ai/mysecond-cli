@@ -3,6 +3,7 @@
 import { runInit } from './commands/init.js';
 import { runPushOnly, runSync } from './commands/sync.js';
 import { runArtifactSync } from './commands/artifact-sync.js';
+import { runEmitEvent } from './commands/emit-event.js';
 import { runPluginRefresh } from './commands/plugin-refresh.js';
 import { runWhereami } from './commands/whereami.js';
 import { runCredentials } from './commands/credentials.js';
@@ -44,6 +45,11 @@ const SUBCOMMANDS: readonly Subcommand[] = [
     name: 'artifact-sync',
     summary: 'Push a changed artifact (skill output, doc, plan) up to mysecond.ai.',
     run: runArtifactSync,
+  },
+  {
+    name: 'emit-event',
+    summary: 'Emit a Claude Code usage event (skill/workflow/subagent run) for adoption tracking. Used by the tracking hook.',
+    run: runEmitEvent,
   },
   {
     name: 'plugin-refresh',
