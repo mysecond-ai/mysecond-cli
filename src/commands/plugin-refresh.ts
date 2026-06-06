@@ -20,6 +20,7 @@ import { join } from 'node:path';
 
 import { pluginTarball } from '../lib/api.js';
 import { resolveClaudeBin } from '../lib/claude-bin.js';
+import { ensureCompanionHooks } from '../lib/companion-hooks.js';
 import type { CommandContext } from '../lib/context.js';
 import { cacheLastKnownGood } from '../lib/last-known-good.js';
 import {
@@ -69,6 +70,14 @@ export async function runPluginRefresh(
   } catch {
     return 0; // corrupt slug in sync-state — nothing safe to do
   }
+
+  // Ensure the usage-tracking hook is present in `.claude/settings.json`. Done
+  // HERE (after auth + slug validation = a confirmed install) so it runs on EVERY
+  // return path below — including the "plugin already up to date" early return,
+  // which a customer who's plugin-current but predates this hook would otherwise
+  // hit without ever getting the settings hook (Codex P1-4). Best-effort + never
+  // throws; independent of the plugin reinstall outcome.
+  await ensureCompanionHooks(ctx.rootDir, { silent: ctx.silent });
 
   // What version is available? Any error here (network/auth/revoked) leaves the
   // working install in place — we just try again next time.

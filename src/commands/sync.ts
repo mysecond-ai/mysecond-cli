@@ -11,6 +11,7 @@ import {
   confirmFirstSetup,
   emitTelemetry,
 } from '../lib/api.js';
+import { ensureCompanionHooks } from '../lib/companion-hooks.js';
 import type { CommandContext } from '../lib/context.js';
 import { resolveConflict, type ConflictOutcome } from '../lib/conflict.js';
 import { getProjectScopedCredsPath } from '../lib/creds-path.js';
@@ -753,6 +754,13 @@ export async function runSync(
   if (ctx.apiKey.length === 0) {
     throw MysecondError.invalidApiKey('COMPANION_API_KEY not set');
   }
+
+  // Ensure the usage-tracking hook is present in `.claude/settings.json` on EVERY
+  // sync path. Placed here — after credential resolution, before the `--push-all`
+  // / `--push-only` early returns — so a stranded customer's manual `mysecond sync`
+  // (or the realtime push-only hook) still self-heals the settings hook (Codex
+  // P2-7). Best-effort + never throws.
+  await ensureCompanionHooks(ctx.rootDir, { silent: ctx.silent });
 
   // `--push-all`: explicit local→server catch-up, independent of the pull
   // reconcile and the hook side effects. Return early — push-all is a
