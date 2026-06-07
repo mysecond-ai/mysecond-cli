@@ -38,6 +38,9 @@ interface HookEvent {
   // code.claude.com/docs/en/sub-agents) — NOT inside tool_input. It's the custom
   // subagent's frontmatter `name` (e.g. "cto-tech-lead"), or "general-purpose".
   agent_type?: string;
+  // SubagentStop also carries a per-run `agent_id` — used as the dedup key so a
+  // replayed SubagentStop for the same subagent collapses (vs a random UUID).
+  agent_id?: string;
   tool_response?: { is_error?: boolean } | unknown;
   // UserPromptExpansion: structured slash-command name + raw prompt fallback.
   command_name?: string;
@@ -224,10 +227,14 @@ export function buildTypeEvent(
       event_type: 'subagent_run',
       name,
       session_id: sessionId,
-      // SubagentStop carries no tool_use_id — synthesize a unique id so the
-      // server's (user_id, session_id, tool_call_id) dedup keeps each distinct
-      // subagent run as its own row (NULLS NOT DISTINCT would collapse nulls).
-      tool_call_id: `subagent-${randomUUID()}`,
+      // Dedup id: prefer the payload's per-run `agent_id` so a replayed
+      // SubagentStop for the same subagent collapses on the server's
+      // (user_id, session_id, tool_call_id) key; fall back to a synthetic UUID
+      // when absent (still unique → never wrongly collapsed by NULLS NOT DISTINCT).
+      tool_call_id:
+        typeof event.agent_id === 'string' && event.agent_id.length > 0
+          ? `subagent-${event.agent_id}`
+          : `subagent-${randomUUID()}`,
       cwd,
       error: false,
       hook_version: HOOK_VERSION,

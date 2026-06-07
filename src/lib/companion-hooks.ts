@@ -86,9 +86,17 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 // trailing `# <marker>` is the stable idempotency marker (Codex P0-3). Exported
 // for tests.
 export function buildHookCommand(version: string): string {
+  // Use a GLOBAL `mysecond` only when it is EXACTLY the pinned version — otherwise
+  // a stale-but-functional global (e.g. an older `mysecond` that exits 0 but lacks
+  // a newer event branch) would handle the event, emit nothing, exit 0, and the
+  // pinned npx fallback would never run → the new behavior silently no-ops (Codex
+  // P1, the "stale global" class). The version check reads </dev/null so it never
+  // touches the buffered event stdin. npx-only customers (no global) skip straight
+  // to the pinned npx arm.
   return (
     `bash -lc 'json=$(cat); ` +
-    `printf "%s" "$json" | mysecond emit-event --silent 2>/dev/null && exit 0; ` +
+    `if command -v mysecond >/dev/null 2>&1 && [ "$(mysecond --version </dev/null 2>/dev/null)" = "${version}" ]; then ` +
+    `printf "%s" "$json" | mysecond emit-event --silent 2>/dev/null && exit 0; fi; ` +
     `printf "%s" "$json" | npx -y @mysecond/cli@${version} emit-event --silent 2>/dev/null || true` +
     `  # ${HOOK_MARKER}'`
   );

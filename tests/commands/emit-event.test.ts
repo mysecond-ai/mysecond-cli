@@ -321,6 +321,23 @@ describe('runEmitEvent', () => {
     expect(hit!.body.error).toBe(false);
   });
 
+  it('uses the payload agent_id for the dedup tool_call_id when present', async () => {
+    const root = tmpProject();
+    stubStdin(
+      JSON.stringify({
+        hook_event_name: 'SubagentStop',
+        agent_type: 'cto',
+        agent_id: 'agent-abc-123',
+        session_id: uniqueSession(),
+        cwd: root,
+      })
+    );
+    await runEmitEvent([], ctx(root));
+    const hit = callForEventType(fetchMock, 'subagent_run');
+    // stable dedup key (not a random UUID) → a replayed SubagentStop collapses.
+    expect(hit!.body.tool_call_id).toBe('subagent-agent-abc-123');
+  });
+
   it('falls back to tool_input.subagent_type on SubagentStop when agent_type is absent', async () => {
     const root = tmpProject();
     stubStdin(

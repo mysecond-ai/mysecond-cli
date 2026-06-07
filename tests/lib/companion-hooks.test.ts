@@ -6,7 +6,7 @@
 //  P1-5 fail-closed on schema-invalid containers; P1-6 concurrent writes serialize.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,10 +58,12 @@ function expectWrite(r: PlanResult): Record<string, unknown> {
 }
 
 describe('buildHookCommand', () => {
-  it('buffers stdin, pins the version, falls back to npx, and carries the stable marker', () => {
+  it('buffers stdin, version-gates the global, pins npx, and carries the stable marker', () => {
     const cmd = buildHookCommand('1.8.0');
     expect(cmd).toContain('json=$(cat)'); // P0-1: buffer stdin once
-    expect(cmd).toContain('printf "%s" "$json" | mysecond emit-event'); // replay to global arm
+    expect(cmd).toContain('command -v mysecond'); // global fast-path requires a global...
+    expect(cmd).toContain('[ "$(mysecond --version </dev/null 2>/dev/null)" = "1.8.0" ]'); // ...of the EXACT pinned version (P1)
+    expect(cmd).toContain('printf "%s" "$json" | mysecond emit-event'); // global arm
     expect(cmd).toContain('&& exit 0'); // global arm only on success
     expect(cmd).toContain('printf "%s" "$json" | npx -y @mysecond/cli@1.8.0 emit-event'); // pinned npx replay
     expect(cmd).toContain('|| true'); // non-fatal
@@ -290,37 +292,56 @@ describe('ensureCompanionHooks — disk IO', () => {
   });
 });
 
-// Execution-level proof of the P0-1 stdin replay: the unit tests above check the
-// command STRING; this one RUNS it with a fake stale `mysecond` (drains stdin,
-// fails) and proves the npx fallback still receives the original event JSON.
-describe('the injected command replays buffered stdin to the npx fallback (Codex P0-1)', () => {
-  it('a stale global that drains stdin then fails does not starve the npx arm', () => {
-    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
-    const capture = join(bin, 'captured.json');
-    // Fake global `mysecond`: consume stdin, then EXIT NON-ZERO (the stale-global case).
-    const mysecondStub = join(bin, 'mysecond');
-    writeFileSync(mysecondStub, '#!/bin/sh\ncat >/dev/null\nexit 1\n');
-    chmodSync(mysecondStub, 0o755);
-    // Fake `npx`: ignore args, write whatever arrives on stdin to the capture file.
-    const npxStub = join(bin, 'npx');
-    writeFileSync(npxStub, `#!/bin/sh\ncat > "${capture}"\n`);
-    chmodSync(npxStub, 0o755);
-
-    // Run the REAL inner command (strip the `bash -lc '…'` wrapper) via `bash -c`
-    // with our stub bin on PATH. (`-c` not `-lc`: the login-shell PATH reset is
-    // irrelevant to the stdin-replay logic under test.)
-    const full = buildHookCommand('1.8.0');
+// Execution-level proof of the P0-1 stdin replay + the P1 version-gate: the unit
+// tests above check the command STRING; these RUN it with stub `mysecond`/`npx` on
+// PATH and prove which arm actually receives the buffered event JSON.
+describe('the injected command (stdin replay + version-gate)', () => {
+  // Strip the `bash -lc '…'` wrapper and run the inner command via `bash -c` with a
+  // stub bin on PATH (`-c` not `-lc`: the login-shell PATH reset is irrelevant here).
+  function runInner(version: string, eventJson: string, bin: string): void {
+    const full = buildHookCommand(version);
     const inner = full.slice("bash -lc '".length, full.length - 1);
-
-    const eventJson = '{"hook_event_name":"UserPromptSubmit","prompt":"/prd-generator"}';
     execFileSync('bash', ['-c', inner], {
       input: eventJson,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     });
+  }
 
-    // The npx arm received the ORIGINAL event JSON even though the global arm
-    // consumed its own copy first and failed. ($(cat) strips a trailing newline;
-    // we sent none, so the bytes match exactly.)
-    expect(readFileSync(capture, 'utf8')).toBe(eventJson);
+  it('a STALE-version global is skipped and the npx arm gets the original stdin (P1)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
+    const npxCapture = join(bin, 'npx.json');
+    // Stale global: `--version` reports a non-pinned version (gate skips it); any
+    // other call drains stdin + exits non-zero. Either way it must not handle the event.
+    writeFileSync(
+      join(bin, 'mysecond'),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "0.0.0-stale"; exit 0; fi\ncat >/dev/null\nexit 1\n'
+    );
+    chmodSync(join(bin, 'mysecond'), 0o755);
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\ncat > "${npxCapture}"\n`);
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const eventJson = '{"hook_event_name":"UserPromptSubmit","prompt":"/prd-generator"}';
+    runInner('1.8.0', eventJson, bin);
+    // npx (pinned) got the ORIGINAL json; the stale global never handled it.
+    expect(readFileSync(npxCapture, 'utf8')).toBe(eventJson);
+  });
+
+  it('a MATCHING-version global handles the event and npx never runs (fast path)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
+    const globalCapture = join(bin, 'global.json');
+    const npxCapture = join(bin, 'npx.json');
+    // Matching global: `--version` == pinned; emit-event captures stdin + exits 0.
+    writeFileSync(
+      join(bin, 'mysecond'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "1.8.0"; exit 0; fi\ncat > "${globalCapture}"\nexit 0\n`
+    );
+    chmodSync(join(bin, 'mysecond'), 0o755);
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\ncat > "${npxCapture}"\n`);
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const eventJson = '{"hook_event_name":"SubagentStop","agent_type":"cto"}';
+    runInner('1.8.0', eventJson, bin);
+    expect(readFileSync(globalCapture, 'utf8')).toBe(eventJson); // global handled it
+    expect(existsSync(npxCapture)).toBe(false); // npx never ran
   });
 });
