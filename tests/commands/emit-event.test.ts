@@ -296,6 +296,79 @@ describe('runEmitEvent', () => {
     }
   );
 
+  // ---- subagent_run via SubagentStop (the real settings.json-delivered path) ---
+
+  it('classifies a SubagentStop event as subagent_run, reading the TOP-LEVEL agent_type', async () => {
+    const root = tmpProject();
+    const sessionId = uniqueSession();
+    stubStdin(
+      JSON.stringify({
+        hook_event_name: 'SubagentStop',
+        agent_type: 'pm-os:cto-tech-lead', // top-level — NOT tool_input.subagent_type
+        session_id: sessionId,
+        cwd: root,
+      })
+    );
+
+    await runEmitEvent([], ctx(root));
+    const hit = callForEventType(fetchMock, 'subagent_run');
+    expect(hit).not.toBeNull();
+    expect(hit!.body.name).toBe('cto-tech-lead'); // namespace stripped
+    expect(hit!.body.session_id).toBe(sessionId);
+    // synthetic unique id so the server's (user,session,tool_call_id) dedup keeps
+    // each distinct subagent run as its own row.
+    expect(String(hit!.body.tool_call_id)).toMatch(/^subagent-/);
+    expect(hit!.body.error).toBe(false);
+  });
+
+  it('uses the payload agent_id for the dedup tool_call_id when present', async () => {
+    const root = tmpProject();
+    stubStdin(
+      JSON.stringify({
+        hook_event_name: 'SubagentStop',
+        agent_type: 'cto',
+        agent_id: 'agent-abc-123',
+        session_id: uniqueSession(),
+        cwd: root,
+      })
+    );
+    await runEmitEvent([], ctx(root));
+    const hit = callForEventType(fetchMock, 'subagent_run');
+    // stable dedup key (not a random UUID) → a replayed SubagentStop collapses.
+    expect(hit!.body.tool_call_id).toBe('subagent-agent-abc-123');
+  });
+
+  it('falls back to tool_input.subagent_type on SubagentStop when agent_type is absent', async () => {
+    const root = tmpProject();
+    stubStdin(
+      JSON.stringify({
+        hook_event_name: 'SubagentStop',
+        tool_input: { subagent_type: 'general-purpose' },
+        session_id: uniqueSession(),
+        cwd: root,
+      })
+    );
+    await runEmitEvent([], ctx(root));
+    const hit = callForEventType(fetchMock, 'subagent_run');
+    expect(hit).not.toBeNull();
+    expect(hit!.body.name).toBe('general-purpose');
+  });
+
+  it('emits no subagent_run for a SubagentStop with no resolvable agent type', async () => {
+    const root = tmpProject();
+    stubStdin(
+      JSON.stringify({
+        hook_event_name: 'SubagentStop',
+        session_id: uniqueSession(),
+        cwd: root,
+      })
+    );
+    await runEmitEvent([], ctx(root));
+    expect(callForEventType(fetchMock, 'subagent_run')).toBeNull();
+    // session_start still fires (first fire of the session).
+    expect(callForEventType(fetchMock, 'session_start')).not.toBeNull();
+  });
+
   it('does NOT emit a type event for a non-tracked PostToolUse tool (e.g. Bash)', async () => {
     const root = tmpProject();
     stubStdin(

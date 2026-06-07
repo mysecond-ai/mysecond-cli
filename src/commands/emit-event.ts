@@ -34,6 +34,13 @@ interface HookEvent {
     skill_name?: string;
     subagent_type?: string;
   };
+  // SubagentStop: the subagent's type lives TOP-LEVEL as `agent_type` (per
+  // code.claude.com/docs/en/sub-agents) — NOT inside tool_input. It's the custom
+  // subagent's frontmatter `name` (e.g. "cto-tech-lead"), or "general-purpose".
+  agent_type?: string;
+  // SubagentStop also carries a per-run `agent_id` — used as the dedup key so a
+  // replayed SubagentStop for the same subagent collapses (vs a random UUID).
+  agent_id?: string;
   tool_response?: { is_error?: boolean } | unknown;
   // UserPromptExpansion: structured slash-command name + raw prompt fallback.
   command_name?: string;
@@ -196,6 +203,38 @@ export function buildTypeEvent(
       // be non-null + globally unique to respect the server's
       // (user_id, session_id, tool_call_id) dedup.
       tool_call_id: `prompt-${randomUUID()}`,
+      cwd,
+      error: false,
+      hook_version: HOOK_VERSION,
+    };
+  }
+
+  if (hookName === 'SubagentStop') {
+    // A subagent finished. Its type is the top-level `agent_type` (per
+    // code.claude.com/docs/en/hooks + /sub-agents): the subagent's frontmatter
+    // `name` (e.g. "cto-tech-lead"), or "general-purpose" for ad-hoc spawns.
+    // Read tool_input.subagent_type as a defensive fallback — the exact field
+    // name burned us once (the old, dead PostToolUse path assumed
+    // tool_input.subagent_type), so accept both candidates until it's pinned
+    // empirically by a real SubagentStop payload.
+    const rawType =
+      (typeof event.agent_type === 'string' && event.agent_type) ||
+      (typeof event.tool_input?.subagent_type === 'string' && event.tool_input.subagent_type) ||
+      '';
+    const name = stripNamespace(rawType);
+    if (name.length === 0) return null;
+    return {
+      event_type: 'subagent_run',
+      name,
+      session_id: sessionId,
+      // Dedup id: prefer the payload's per-run `agent_id` so a replayed
+      // SubagentStop for the same subagent collapses on the server's
+      // (user_id, session_id, tool_call_id) key; fall back to a synthetic UUID
+      // when absent (still unique → never wrongly collapsed by NULLS NOT DISTINCT).
+      tool_call_id:
+        typeof event.agent_id === 'string' && event.agent_id.length > 0
+          ? `subagent-${event.agent_id}`
+          : `subagent-${randomUUID()}`,
       cwd,
       error: false,
       hook_version: HOOK_VERSION,

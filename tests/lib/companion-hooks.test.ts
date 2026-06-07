@@ -6,7 +6,7 @@
 //  P1-5 fail-closed on schema-invalid containers; P1-6 concurrent writes serialize.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,10 +35,10 @@ function readSettings(root: string): Record<string, unknown> {
   return JSON.parse(readFileSync(settingsPathOf(root), 'utf8')) as Record<string, unknown>;
 }
 
-// Count hooks (across all UserPromptSubmit groups) whose command carries our marker.
-function countMarkedHooks(settings: Record<string, unknown>): string[] {
-  const hooks = settings.hooks as { UserPromptSubmit?: unknown } | undefined;
-  const groups = hooks?.UserPromptSubmit;
+// Count hooks (across all groups for the given event) whose command carries our marker.
+function countMarkedHooks(settings: Record<string, unknown>, eventName = 'UserPromptSubmit'): string[] {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  const groups = hooks?.[eventName];
   if (!Array.isArray(groups)) return [];
   const out: string[] = [];
   for (const g of groups) {
@@ -58,10 +58,12 @@ function expectWrite(r: PlanResult): Record<string, unknown> {
 }
 
 describe('buildHookCommand', () => {
-  it('buffers stdin, pins the version, falls back to npx, and carries the stable marker', () => {
+  it('buffers stdin, version-gates the global, pins npx, and carries the stable marker', () => {
     const cmd = buildHookCommand('1.8.0');
     expect(cmd).toContain('json=$(cat)'); // P0-1: buffer stdin once
-    expect(cmd).toContain('printf "%s" "$json" | mysecond emit-event'); // replay to global arm
+    expect(cmd).toContain('command -v mysecond'); // global fast-path requires a global...
+    expect(cmd).toContain('[ "$(mysecond --version </dev/null 2>/dev/null)" = "1.8.0" ]'); // ...of the EXACT pinned version (P1)
+    expect(cmd).toContain('printf "%s" "$json" | mysecond emit-event'); // global arm
     expect(cmd).toContain('&& exit 0'); // global arm only on success
     expect(cmd).toContain('printf "%s" "$json" | npx -y @mysecond/cli@1.8.0 emit-event'); // pinned npx replay
     expect(cmd).toContain('|| true'); // non-fatal
@@ -100,6 +102,42 @@ describe('planCompanionSettings — version rewrite (P0-3)', () => {
     expect(marked).toHaveLength(1); // still ONE, not two
     expect(marked[0]).toContain('@mysecond/cli@1.9.0'); // updated
     expect(marked[0]).not.toContain('@mysecond/cli@1.8.0');
+  });
+});
+
+describe('planCompanionSettings — SubagentStop hook (sub-agent tracking)', () => {
+  it('injects BOTH a UserPromptSubmit and a SubagentStop hook with the same command', () => {
+    const next = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    const ups = countMarkedHooks(next, 'UserPromptSubmit');
+    const sas = countMarkedHooks(next, 'SubagentStop');
+    expect(ups).toHaveLength(1);
+    expect(sas).toHaveLength(1);
+    expect(sas[0]).toBe(ups[0]); // one command string, two events
+  });
+
+  it('is idempotent across both events (re-plan = noop)', () => {
+    const next = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    expect(planCompanionSettings(next, '1.9.0', true).action).toBe('noop');
+  });
+
+  it('a version bump rewrites BOTH hooks in place (one each, new version)', () => {
+    const v1 = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    const v2 = expectWrite(planCompanionSettings(v1, '2.0.0', true));
+    for (const ev of ['UserPromptSubmit', 'SubagentStop']) {
+      const marked = countMarkedHooks(v2, ev);
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain('@mysecond/cli@2.0.0');
+      expect(marked[0]).not.toContain('@mysecond/cli@1.9.0');
+    }
+  });
+
+  it('preserves a customer SubagentStop hook and appends ours', () => {
+    const customer = {
+      hooks: { SubagentStop: [{ matcher: '', hooks: [{ type: 'command', command: 'echo custom-subagent' }] }] },
+    };
+    const next = expectWrite(planCompanionSettings(customer, '1.9.0', true));
+    expect(JSON.stringify(next.hooks)).toContain('echo custom-subagent');
+    expect(countMarkedHooks(next, 'SubagentStop')).toHaveLength(1);
   });
 });
 
@@ -148,25 +186,27 @@ describe('planCompanionSettings — fail closed (P0-2 / P1-5)', () => {
     expect(countMarkedHooks(next)).toHaveLength(0); // no hook injected into garbage
   });
 
-  it('leaves a non-array UserPromptSubmit untouched and skips the hook', () => {
+  it('leaves a non-array UserPromptSubmit untouched (SubagentStop still injected independently)', () => {
+    // env already set; UserPromptSubmit is malformed → skipped (NOT coerced); but
+    // SubagentStop is absent → it gets added, so the overall action is 'write'.
+    // The two events are independent: one malformed container never blocks the other.
     const input = { env: { [ENV_KEY]: '20000' }, hooks: { UserPromptSubmit: 'bad' } };
-    // env already set + hook skipped → nothing changes → noop.
-    expect(planCompanionSettings(input, '1.8.0', true).action).toBe('noop');
-    // and it definitely doesn't coerce the bad value:
-    const forced = planCompanionSettings({ hooks: { UserPromptSubmit: 'bad' } }, '1.8.0', true);
-    const next = expectWrite(forced); // env change forces a write
+    const next = expectWrite(planCompanionSettings(input, '1.8.0', true));
+    // the bad UserPromptSubmit value is preserved verbatim, not turned into an array:
     expect((next.hooks as { UserPromptSubmit: unknown }).UserPromptSubmit).toBe('bad');
-    expect(countMarkedHooks(next)).toHaveLength(0);
+    expect(countMarkedHooks(next, 'UserPromptSubmit')).toHaveLength(0);
+    expect(countMarkedHooks(next, 'SubagentStop')).toHaveLength(1);
   });
 });
 
 describe('ensureCompanionHooks — disk IO', () => {
-  it('creates settings.json with env + hook in a fresh project', async () => {
+  it('creates settings.json with env + both hooks in a fresh project', async () => {
     const root = tmpProject();
-    await ensureCompanionHooks(root, { silent: true, version: '1.8.0' });
+    await ensureCompanionHooks(root, { silent: true, version: '1.9.0' });
     const s = readSettings(root);
     expect((s.env as Record<string, string>)[ENV_KEY]).toBe('20000');
-    expect(countMarkedHooks(s)).toHaveLength(1);
+    expect(countMarkedHooks(s, 'UserPromptSubmit')).toHaveLength(1);
+    expect(countMarkedHooks(s, 'SubagentStop')).toHaveLength(1);
   });
 
   it('is idempotent on disk: running twice leaves exactly one hook', async () => {
@@ -252,37 +292,56 @@ describe('ensureCompanionHooks — disk IO', () => {
   });
 });
 
-// Execution-level proof of the P0-1 stdin replay: the unit tests above check the
-// command STRING; this one RUNS it with a fake stale `mysecond` (drains stdin,
-// fails) and proves the npx fallback still receives the original event JSON.
-describe('the injected command replays buffered stdin to the npx fallback (Codex P0-1)', () => {
-  it('a stale global that drains stdin then fails does not starve the npx arm', () => {
-    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
-    const capture = join(bin, 'captured.json');
-    // Fake global `mysecond`: consume stdin, then EXIT NON-ZERO (the stale-global case).
-    const mysecondStub = join(bin, 'mysecond');
-    writeFileSync(mysecondStub, '#!/bin/sh\ncat >/dev/null\nexit 1\n');
-    chmodSync(mysecondStub, 0o755);
-    // Fake `npx`: ignore args, write whatever arrives on stdin to the capture file.
-    const npxStub = join(bin, 'npx');
-    writeFileSync(npxStub, `#!/bin/sh\ncat > "${capture}"\n`);
-    chmodSync(npxStub, 0o755);
-
-    // Run the REAL inner command (strip the `bash -lc '…'` wrapper) via `bash -c`
-    // with our stub bin on PATH. (`-c` not `-lc`: the login-shell PATH reset is
-    // irrelevant to the stdin-replay logic under test.)
-    const full = buildHookCommand('1.8.0');
+// Execution-level proof of the P0-1 stdin replay + the P1 version-gate: the unit
+// tests above check the command STRING; these RUN it with stub `mysecond`/`npx` on
+// PATH and prove which arm actually receives the buffered event JSON.
+describe('the injected command (stdin replay + version-gate)', () => {
+  // Strip the `bash -lc '…'` wrapper and run the inner command via `bash -c` with a
+  // stub bin on PATH (`-c` not `-lc`: the login-shell PATH reset is irrelevant here).
+  function runInner(version: string, eventJson: string, bin: string): void {
+    const full = buildHookCommand(version);
     const inner = full.slice("bash -lc '".length, full.length - 1);
-
-    const eventJson = '{"hook_event_name":"UserPromptSubmit","prompt":"/prd-generator"}';
     execFileSync('bash', ['-c', inner], {
       input: eventJson,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
     });
+  }
 
-    // The npx arm received the ORIGINAL event JSON even though the global arm
-    // consumed its own copy first and failed. ($(cat) strips a trailing newline;
-    // we sent none, so the bytes match exactly.)
-    expect(readFileSync(capture, 'utf8')).toBe(eventJson);
+  it('a STALE-version global is skipped and the npx arm gets the original stdin (P1)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
+    const npxCapture = join(bin, 'npx.json');
+    // Stale global: `--version` reports a non-pinned version (gate skips it); any
+    // other call drains stdin + exits non-zero. Either way it must not handle the event.
+    writeFileSync(
+      join(bin, 'mysecond'),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "0.0.0-stale"; exit 0; fi\ncat >/dev/null\nexit 1\n'
+    );
+    chmodSync(join(bin, 'mysecond'), 0o755);
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\ncat > "${npxCapture}"\n`);
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const eventJson = '{"hook_event_name":"UserPromptSubmit","prompt":"/prd-generator"}';
+    runInner('1.8.0', eventJson, bin);
+    // npx (pinned) got the ORIGINAL json; the stale global never handled it.
+    expect(readFileSync(npxCapture, 'utf8')).toBe(eventJson);
+  });
+
+  it('a MATCHING-version global handles the event and npx never runs (fast path)', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'mysecond-bin-'));
+    const globalCapture = join(bin, 'global.json');
+    const npxCapture = join(bin, 'npx.json');
+    // Matching global: `--version` == pinned; emit-event captures stdin + exits 0.
+    writeFileSync(
+      join(bin, 'mysecond'),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "1.8.0"; exit 0; fi\ncat > "${globalCapture}"\nexit 0\n`
+    );
+    chmodSync(join(bin, 'mysecond'), 0o755);
+    writeFileSync(join(bin, 'npx'), `#!/bin/sh\ncat > "${npxCapture}"\n`);
+    chmodSync(join(bin, 'npx'), 0o755);
+
+    const eventJson = '{"hook_event_name":"SubagentStop","agent_type":"cto"}';
+    runInner('1.8.0', eventJson, bin);
+    expect(readFileSync(globalCapture, 'utf8')).toBe(eventJson); // global handled it
+    expect(existsSync(npxCapture)).toBe(false); // npx never ran
   });
 });
