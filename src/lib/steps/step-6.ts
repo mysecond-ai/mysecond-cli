@@ -1,64 +1,19 @@
-// Step 6: Write `.claude/settings.json` env block — only the
-// SLASH_COMMAND_TOOL_CHAR_BUDGET=20000 key. Hooks live in plugin manifest per
-// CAIO-Y1 (v1.3); this step now only writes the env block. Spec §6.3a merge
-// rules: single-key update, preserve all other env entries verbatim,
-// customer-authored value wins on conflict (PostHog event fires; no override).
+// Step 6: Ensure the mySecond-managed `.claude/settings.json` surface — the env
+// block (SLASH_COMMAND_TOOL_CHAR_BUDGET) AND the usage-tracking `UserPromptSubmit`
+// hook. Both are owned by `ensureCompanionHooks` (one strict-parse, locked,
+// fail-closed read-modify-write), so init never routes settings.json through a
+// lenient reader that could clobber a corrupt-but-present file (Codex P0-2).
+//
+// History: hooks used to live here, were moved to the plugin manifest (CAIO-Y1,
+// v1.3) — which silently broke delivery because plugin-delivered hooks don't fire
+// in Claude Code — and are now re-injected here. Full root-cause writeup in
+// `companion-hooks.ts`.
 
-import { existsSync, readFileSync } from 'node:fs';
-
-import { atomicWriteFile } from '../atomic-write.js';
-import { projectPaths } from '../files.js';
+import { ensureCompanionHooks } from '../companion-hooks.js';
 
 import type { StepFn } from './types.js';
 
-const ENV_KEY = 'SLASH_COMMAND_TOOL_CHAR_BUDGET';
-const ENV_VALUE = '20000';
-
-interface SettingsShape {
-  env?: Record<string, string>;
-  [key: string]: unknown;
-}
-
-function readSettings(path: string): SettingsShape {
-  if (!existsSync(path)) return {};
-  try {
-    const raw = readFileSync(path, 'utf8');
-    if (raw.trim().length === 0) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
-    return parsed as SettingsShape;
-  } catch {
-    return {};
-  }
-}
-
 export const step6: StepFn = async ({ ctx }) => {
-  const settingsPath = projectPaths(ctx.rootDir).syncStatePath.replace(
-    /sync-state\.json$/,
-    'settings.json'
-  );
-
-  const settings = readSettings(settingsPath);
-  const env = { ...(settings.env ?? {}) };
-
-  // Idempotency: matching value → no-op.
-  if (env[ENV_KEY] === ENV_VALUE) {
-    return { step: 6, outcome: { kind: 'completed' } };
-  }
-
-  // Conflict (customer-authored different value): preserve customer's value,
-  // log conflict, continue. Spec §6.3a — customer wins.
-  if (env[ENV_KEY] !== undefined && env[ENV_KEY] !== ENV_VALUE) {
-    if (!ctx.silent) {
-      process.stderr.write(
-        `mysecond: noted .claude/settings.json env.${ENV_KEY}=${env[ENV_KEY]} (customer value preserved over our default ${ENV_VALUE})\n`
-      );
-    }
-    return { step: 6, outcome: { kind: 'completed' } };
-  }
-
-  env[ENV_KEY] = ENV_VALUE;
-  const next: SettingsShape = { ...settings, env };
-  atomicWriteFile(settingsPath, JSON.stringify(next, null, 2) + '\n', { mkdirRecursive: true });
+  await ensureCompanionHooks(ctx.rootDir, { silent: ctx.silent });
   return { step: 6, outcome: { kind: 'completed' } };
 };

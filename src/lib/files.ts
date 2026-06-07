@@ -103,6 +103,7 @@ export interface ProjectPaths {
   workflowsDir: string;
   claudeMdPath: string;
   syncStatePath: string;
+  settingsPath: string;
   conflictsDir: string;
 }
 
@@ -114,6 +115,7 @@ export function projectPaths(rootDir: string): ProjectPaths {
     workflowsDir: join(rootDir, 'workflows'),
     claudeMdPath: join(rootDir, 'CLAUDE.md'),
     syncStatePath: join(rootDir, '.claude', 'sync-state.json'),
+    settingsPath: join(rootDir, '.claude', 'settings.json'),
     conflictsDir: join(rootDir, '.claude', 'sync-conflicts'),
   };
 }
