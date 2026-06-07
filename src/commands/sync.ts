@@ -34,7 +34,7 @@ import {
   maybePrintUpgradeNag,
   shouldRunNpmUpdate,
 } from '../lib/npm.js';
-import { maybePrintPluginRefreshNudge } from '../lib/plugin-refresh-nag.js';
+import { resolvePluginRefreshNudge } from '../lib/plugin-refresh-nag.js';
 import {
   scanArtifacts,
   scanContextFiles,
@@ -95,6 +95,12 @@ interface SyncSummary {
   // substitute for version pinning, and the signal for spotting a base-SHA
   // shift mid-workflow. Null when the server didn't return one this round.
   basePluginVersion: string | null;
+  // Per-file conflict notices collected during the down-sync. In silent mode
+  // (SessionStart hook) these are NOT written to stdout directly — that would
+  // corrupt the single hook-JSON object and drop the systemMessage nudge.
+  // printSummary folds them into `additionalContext` instead. Empty in TTY mode
+  // (there, resolveConflict writes them straight to stderr in real time).
+  conflictNotices: string[];
 }
 
 function emptySummary(): SyncSummary {
@@ -119,6 +125,7 @@ function emptySummary(): SyncSummary {
     baseWorkflowsUpdated: 0,
     baseSkippedDueToCustomization: 0,
     basePluginVersion: null,
+    conflictNotices: [],
   };
 }
 
@@ -413,13 +420,20 @@ async function upSyncContextFiles(
   return result.synced;
 }
 
-function printSummary(summary: SyncSummary, ctx: CommandContext): void {
-  // CAIO finding: stderr from SessionStart hooks is silently dropped on exit 0.
-  // Customer-relevant messages MUST go to stdout when ctx.silent so Claude sees
-  // them as session-start context and can mention them to the customer.
-  const out = ctx.silent ? process.stdout : process.stdout;
-
+function printSummary(
+  summary: SyncSummary,
+  ctx: CommandContext,
+  pluginRefreshNudge: string | null = null,
+): void {
   if (ctx.silent) {
+    // SessionStart-hook output protocol. The hook's stdout is parsed as JSON, so
+    // route notices by audience: top-level `systemMessage` is shown DIRECTLY to
+    // the user by Claude Code; `hookSpecificOutput.additionalContext` is a system
+    // reminder Claude reads but the user doesn't see. Plain stdout would ALL become
+    // additionalContext (and stderr on exit 0 is dropped) — neither reliably reaches
+    // the user — so the plugin-refresh nudge MUST ride in systemMessage. Verified
+    // against code.claude.com/docs/en/hooks.
+    const summaryLines: string[] = [];
     const parts: string[] = [];
     const contextChanges =
       summary.created + summary.updatedFromCloud + summary.conflictsCloudKept;
@@ -433,12 +447,11 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
       summary.conflictsCloudKept + summary.conflictsLocalKept + summary.conflictsSkipped;
     if (conflicts > 0) parts.push(`${conflicts} conflicts (see .claude/sync-conflicts/)`);
     if (parts.length > 0) {
-      out.write(`mysecond: ${parts.join(', ')}\n`);
+      summaryLines.push(`mysecond: ${parts.join(', ')}`);
     }
-    // Workstream H: separate one-liner for base plugin updates so Claude (which
-    // reads this as session-start context) clearly distinguishes "your customs
-    // synced" from "mySecond shipped improvements." Customizations skipped
-    // silently — never mentioned. Link to /changelog so the customer can dig in.
+    // Workstream H: base-plugin updates as a distinct line so Claude (which reads
+    // additionalContext) can distinguish "your customs synced" from "mySecond
+    // shipped improvements." Link to /changelog so the customer can dig in.
     const baseTotal =
       summary.baseSkillsUpdated + summary.baseAgentsUpdated + summary.baseWorkflowsUpdated;
     if (baseTotal > 0) {
@@ -446,19 +459,40 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
       if (summary.baseSkillsUpdated > 0) baseParts.push(`${summary.baseSkillsUpdated} skills`);
       if (summary.baseAgentsUpdated > 0) baseParts.push(`${summary.baseAgentsUpdated} agents`);
       if (summary.baseWorkflowsUpdated > 0) baseParts.push(`${summary.baseWorkflowsUpdated} workflows`);
-      // Tag the new base SHA — this is the signal for spotting a base-SHA
-      // shift between sessions (a multi-session workflow can otherwise observe
-      // steps written by different base versions with no way to tell).
       const baseTag = summary.basePluginVersion
         ? ` (base ${summary.basePluginVersion.slice(0, 7)})`
         : '';
-      out.write(
-        `mysecond: ${baseParts.join(', ')} updated${baseTag} — see https://app.mysecond.ai/changelog\n`,
+      summaryLines.push(
+        `mysecond: ${baseParts.join(', ')} updated${baseTag} — see https://app.mysecond.ai/changelog`,
       );
+    }
+    // Per-file conflict notices collected during the down-sync (resolveConflict
+    // pushed them here instead of writing stdout, so this stays one JSON object).
+    // They share additionalContext's model-relayed audience — same as before this
+    // refactor, when silent stdout became additionalContext wholesale.
+    for (const notice of summary.conflictNotices) summaryLines.push(notice);
+
+    const additionalContext = summaryLines.join('\n');
+    const payload: {
+      systemMessage?: string;
+      hookSpecificOutput: { hookEventName: 'SessionStart'; additionalContext?: string };
+    } = { hookSpecificOutput: { hookEventName: 'SessionStart' } };
+    if (additionalContext.length > 0) {
+      payload.hookSpecificOutput.additionalContext = additionalContext;
+    }
+    if (pluginRefreshNudge) payload.systemMessage = pluginRefreshNudge;
+    // Emit the single hook-protocol JSON object only when there's something to
+    // say — otherwise stay quiet so SessionStart isn't noisy.
+    if (
+      payload.systemMessage !== undefined ||
+      payload.hookSpecificOutput.additionalContext !== undefined
+    ) {
+      process.stdout.write(JSON.stringify(payload) + '\n');
     }
     return;
   }
 
+  const out = process.stdout;
   const parts: string[] = [];
   if (summary.created) parts.push(`${summary.created} new`);
   if (summary.updatedFromCloud) parts.push(`${summary.updatedFromCloud} updated`);
@@ -495,6 +529,12 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
     summary.baseWorkflowsUpdated > 0
   ) {
     out.write(`  See what changed: https://app.mysecond.ai/changelog\n`);
+  }
+
+  // Interactive `mysecond sync`: print the nudge as a plain line (the terminal is
+  // user-visible here; the JSON `systemMessage` protocol is only for the hook).
+  if (pluginRefreshNudge) {
+    out.write(`${pluginRefreshNudge}\n`);
   }
 }
 
@@ -842,7 +882,14 @@ export async function runSync(
   // work/* and decisions/* alongside context/*).
   for (const file of contextFiles) {
     const localContent = readLocalFile(ctx.rootDir, file.file_path);
-    const outcome = resolveConflict({ file, localContent, syncState: state, ctx });
+    // Pass summary.conflictNotices as the sink: in silent mode the per-file
+    // conflict notice is collected here (folded into the hook JSON's
+    // additionalContext by printSummary) instead of being written to stdout,
+    // which would corrupt the single-JSON-object the nudge rides in.
+    const outcome = resolveConflict(
+      { file, localContent, syncState: state, ctx },
+      summary.conflictNotices
+    );
     tally(summary, outcome);
   }
 
@@ -993,17 +1040,6 @@ export async function runSync(
   // twice in the common (no-nag) case.
   maybePrintUpgradeNag(state, ctx.rootDir);
 
-  // Plugin-refresh nudge (separate axis from the npm nag above): one stdout line
-  // (SessionStart-hook stdout → the model's session-start context, which it
-  // relays; stderr would be dropped) when the installed plugin's contract version
-  // is behind the latest the server returned. Self-persisting + 24h-debounced;
-  // reuses MYSECOND_NO_UPGRADE_NAG.
-  maybePrintPluginRefreshNudge(
-    state,
-    ctx.rootDir,
-    response.latest_plugin_contract_version ?? null
-  );
-
   // Self-heal the "duplicate skills" bug (Finding #2) for EXISTING customers.
   // step-9 (plugin install) is skipped on re-runs once the init ledger is
   // complete, so a customer who onboarded during the 2026-05-04→05
@@ -1036,6 +1072,23 @@ export async function runSync(
     await confirmFirstSetup(ctx);
   }
 
-  printSummary(summary, ctx);
+  // Plugin-refresh nudge — resolved LAST, immediately before printSummary emits
+  // it. resolvePluginRefreshNudge persists the 24h debounce stamp as a side
+  // effect, so it MUST sit adjacent to the emission. Resolving it earlier (before
+  // the best-effort pruneStalePlugins, which can block for minutes on `claude
+  // plugin uninstall` subprocesses) opened a window where a SessionStart-hook
+  // timeout could kill the process AFTER the stamp was written but BEFORE the
+  // nudge was shown — suppressing it for 24h with the user never seeing it
+  // (Codex P2). Now a kill during the slow cleanup persists neither, so the next
+  // session simply re-nudges. In the silent hook the nudge rides in the hook
+  // JSON's top-level `systemMessage` (user-visible); plain stdout becomes
+  // additionalContext, which the user never reliably sees.
+  const pluginRefreshNudge = resolvePluginRefreshNudge(
+    state,
+    ctx.rootDir,
+    response.latest_plugin_contract_version ?? null
+  );
+
+  printSummary(summary, ctx, pluginRefreshNudge);
   return 0;
 }
