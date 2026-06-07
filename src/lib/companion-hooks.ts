@@ -12,14 +12,16 @@
 // never fires while SessionStart does). `settings.json` hooks DO fire, so the CLI
 // re-injects the emit hook here. (Reverts CAIO-Y1 for the emit hook only.)
 //
-// We register `UserPromptSubmit` ONLY. NOT `PostToolUse:"Skill"` (the Skill tool is
-// a prompt-expansion that dispatches no PostToolUse event — confirmed no-op, CC
-// issue #43630). NOT `UserPromptExpansion` (a typed slash command fires BOTH it and
-// `UserPromptSubmit`; emit-event would record one row for each with distinct
-// synthetic ids the server dedup can't collapse → double-count). NOT `SubagentStop`
-// (emit-event's dispatcher reads `tool_input.subagent_type`, the PostToolUse shape,
-// not SubagentStop's top-level `agent_type` → it would emit nothing). Subagent
-// tracking is a deliberate fast-follow.
+// We register `UserPromptSubmit` (typed slash commands → skill_run/workflow_run)
+// AND `SubagentStop` (sub-agent completions → subagent_run) — one command for both;
+// emit-event dispatches on the hook_event_name it reads on stdin. NOT
+// `PostToolUse:"Skill"` (the Skill tool is a prompt-expansion that dispatches no
+// PostToolUse event — confirmed no-op, CC issue #43630). NOT `UserPromptExpansion`
+// (a typed slash command fires BOTH it and `UserPromptSubmit`; emit-event would
+// record one row for each with distinct synthetic ids the server dedup can't
+// collapse → double-count). `SubagentStop` carries the sub-agent's type as a
+// TOP-LEVEL `agent_type` (per code.claude.com/docs/en/sub-agents); emit-event reads
+// that — NOT the old `tool_input.subagent_type` guess that silently emitted nothing.
 //
 // Reviewed CTO + CAIO + Codex (2026-06-06). Codex P0s folded:
 //   P0-1  buffer + replay stdin in the command: a stale global `mysecond` that
@@ -115,7 +117,12 @@ export function planCompanionSettings(
   let changed = false;
 
   if (mergeEnvBlock(next, silent)) changed = true;
-  if (mergeUserPromptSubmitHook(next, buildHookCommand(version), silent)) changed = true;
+  // One command, two hook events: UserPromptSubmit captures typed slash commands
+  // (skill_run / workflow_run); SubagentStop captures sub-agent completions
+  // (subagent_run). emit-event dispatches on the hook_event_name it reads on stdin.
+  const command = buildHookCommand(version);
+  if (mergeEventHook(next, 'UserPromptSubmit', command, silent)) changed = true;
+  if (mergeEventHook(next, 'SubagentStop', command, silent)) changed = true;
 
   return changed ? { action: 'write', next } : { action: 'noop' };
 }
@@ -151,13 +158,14 @@ function mergeEnvBlock(next: SettingsShape, silent: boolean): boolean {
   return false;
 }
 
-// UserPromptSubmit hook merge. Creates only MISSING containers; fails closed
-// (skip, never overwrite) if a present container has the wrong type (Codex P1-5);
-// finds our entry by the stable marker and rewrites in place on a version change,
-// else appends our OWN group (customer hooks untouched). Returns true if it changed
-// `next`.
-function mergeUserPromptSubmitHook(
+// Hook merge for ONE event (UserPromptSubmit or SubagentStop). Creates only
+// MISSING containers; fails closed (skip, never overwrite) if a present container
+// has the wrong type (Codex P1-5); finds our entry by the stable marker and
+// rewrites in place on a version change, else appends our OWN group (customer
+// hooks untouched). Returns true if it changed `next`.
+function mergeEventHook(
   next: SettingsShape,
+  eventName: string,
   desiredCommand: string,
   silent: boolean
 ): boolean {
@@ -173,17 +181,17 @@ function mergeUserPromptSubmitHook(
   }
   const hooks = next.hooks as Record<string, unknown>;
 
-  if (hooks.UserPromptSubmit === undefined) {
-    hooks.UserPromptSubmit = [];
-  } else if (!Array.isArray(hooks.UserPromptSubmit)) {
+  if (hooks[eventName] === undefined) {
+    hooks[eventName] = [];
+  } else if (!Array.isArray(hooks[eventName])) {
     if (!silent) {
       process.stderr.write(
-        'mysecond: .claude/settings.json hooks.UserPromptSubmit is not an array — skipping usage-hook injection (left as-is).\n'
+        `mysecond: .claude/settings.json hooks.${eventName} is not an array — skipping usage-hook injection (left as-is).\n`
       );
     }
     return false;
   }
-  const groups = hooks.UserPromptSubmit as unknown[];
+  const groups = hooks[eventName] as unknown[];
 
   // Find OUR hook by the stable marker (version-independent).
   for (const group of groups) {

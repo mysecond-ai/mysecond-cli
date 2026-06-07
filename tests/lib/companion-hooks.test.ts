@@ -35,10 +35,10 @@ function readSettings(root: string): Record<string, unknown> {
   return JSON.parse(readFileSync(settingsPathOf(root), 'utf8')) as Record<string, unknown>;
 }
 
-// Count hooks (across all UserPromptSubmit groups) whose command carries our marker.
-function countMarkedHooks(settings: Record<string, unknown>): string[] {
-  const hooks = settings.hooks as { UserPromptSubmit?: unknown } | undefined;
-  const groups = hooks?.UserPromptSubmit;
+// Count hooks (across all groups for the given event) whose command carries our marker.
+function countMarkedHooks(settings: Record<string, unknown>, eventName = 'UserPromptSubmit'): string[] {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  const groups = hooks?.[eventName];
   if (!Array.isArray(groups)) return [];
   const out: string[] = [];
   for (const g of groups) {
@@ -103,6 +103,42 @@ describe('planCompanionSettings — version rewrite (P0-3)', () => {
   });
 });
 
+describe('planCompanionSettings — SubagentStop hook (sub-agent tracking)', () => {
+  it('injects BOTH a UserPromptSubmit and a SubagentStop hook with the same command', () => {
+    const next = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    const ups = countMarkedHooks(next, 'UserPromptSubmit');
+    const sas = countMarkedHooks(next, 'SubagentStop');
+    expect(ups).toHaveLength(1);
+    expect(sas).toHaveLength(1);
+    expect(sas[0]).toBe(ups[0]); // one command string, two events
+  });
+
+  it('is idempotent across both events (re-plan = noop)', () => {
+    const next = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    expect(planCompanionSettings(next, '1.9.0', true).action).toBe('noop');
+  });
+
+  it('a version bump rewrites BOTH hooks in place (one each, new version)', () => {
+    const v1 = expectWrite(planCompanionSettings({}, '1.9.0', true));
+    const v2 = expectWrite(planCompanionSettings(v1, '2.0.0', true));
+    for (const ev of ['UserPromptSubmit', 'SubagentStop']) {
+      const marked = countMarkedHooks(v2, ev);
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain('@mysecond/cli@2.0.0');
+      expect(marked[0]).not.toContain('@mysecond/cli@1.9.0');
+    }
+  });
+
+  it('preserves a customer SubagentStop hook and appends ours', () => {
+    const customer = {
+      hooks: { SubagentStop: [{ matcher: '', hooks: [{ type: 'command', command: 'echo custom-subagent' }] }] },
+    };
+    const next = expectWrite(planCompanionSettings(customer, '1.9.0', true));
+    expect(JSON.stringify(next.hooks)).toContain('echo custom-subagent');
+    expect(countMarkedHooks(next, 'SubagentStop')).toHaveLength(1);
+  });
+});
+
 describe('planCompanionSettings — customer config is preserved', () => {
   it('appends our group while keeping a customer UserPromptSubmit hook', () => {
     const customer = {
@@ -148,25 +184,27 @@ describe('planCompanionSettings — fail closed (P0-2 / P1-5)', () => {
     expect(countMarkedHooks(next)).toHaveLength(0); // no hook injected into garbage
   });
 
-  it('leaves a non-array UserPromptSubmit untouched and skips the hook', () => {
+  it('leaves a non-array UserPromptSubmit untouched (SubagentStop still injected independently)', () => {
+    // env already set; UserPromptSubmit is malformed → skipped (NOT coerced); but
+    // SubagentStop is absent → it gets added, so the overall action is 'write'.
+    // The two events are independent: one malformed container never blocks the other.
     const input = { env: { [ENV_KEY]: '20000' }, hooks: { UserPromptSubmit: 'bad' } };
-    // env already set + hook skipped → nothing changes → noop.
-    expect(planCompanionSettings(input, '1.8.0', true).action).toBe('noop');
-    // and it definitely doesn't coerce the bad value:
-    const forced = planCompanionSettings({ hooks: { UserPromptSubmit: 'bad' } }, '1.8.0', true);
-    const next = expectWrite(forced); // env change forces a write
+    const next = expectWrite(planCompanionSettings(input, '1.8.0', true));
+    // the bad UserPromptSubmit value is preserved verbatim, not turned into an array:
     expect((next.hooks as { UserPromptSubmit: unknown }).UserPromptSubmit).toBe('bad');
-    expect(countMarkedHooks(next)).toHaveLength(0);
+    expect(countMarkedHooks(next, 'UserPromptSubmit')).toHaveLength(0);
+    expect(countMarkedHooks(next, 'SubagentStop')).toHaveLength(1);
   });
 });
 
 describe('ensureCompanionHooks — disk IO', () => {
-  it('creates settings.json with env + hook in a fresh project', async () => {
+  it('creates settings.json with env + both hooks in a fresh project', async () => {
     const root = tmpProject();
-    await ensureCompanionHooks(root, { silent: true, version: '1.8.0' });
+    await ensureCompanionHooks(root, { silent: true, version: '1.9.0' });
     const s = readSettings(root);
     expect((s.env as Record<string, string>)[ENV_KEY]).toBe('20000');
-    expect(countMarkedHooks(s)).toHaveLength(1);
+    expect(countMarkedHooks(s, 'UserPromptSubmit')).toHaveLength(1);
+    expect(countMarkedHooks(s, 'SubagentStop')).toHaveLength(1);
   });
 
   it('is idempotent on disk: running twice leaves exactly one hook', async () => {
