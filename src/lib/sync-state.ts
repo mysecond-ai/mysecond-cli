@@ -27,6 +27,11 @@ export interface SyncState {
   files: Record<string, SyncStateFileEntry>;
   artifacts: Record<string, SyncStateArtifactEntry>;
   contextFiles: Record<string, SyncStateContextEntry>;
+  // Customs catch-up sweep ledger (.claude/{agents,skills,workflows}). Records
+  // the hash of each custom the sweep has pushed so it doesn't re-push an
+  // unchanged file. Same shape as contextFiles. Absent on pre-feature state →
+  // defaulted to {} on read.
+  customs: Record<string, SyncStateContextEntry>;
   lastSyncedAt: string | null;
   // EDD §5.3 — 24h npm-update timebox cache.
   lastNpmUpdateAt: string | null;
@@ -88,6 +93,7 @@ function freshEmptyState(): SyncState {
     files: {},
     artifacts: {},
     contextFiles: {},
+    customs: {},
     lastSyncedAt: null,
     lastNpmUpdateAt: null,
     initCompletedSteps: [],
@@ -115,6 +121,7 @@ export function readSyncState(rootDir: string): SyncState {
       files: parsed.files ?? {},
       artifacts: parsed.artifacts ?? {},
       contextFiles: parsed.contextFiles ?? {},
+      customs: parsed.customs ?? {},
       initCompletedSteps: parsed.initCompletedSteps ?? [],
       step9Auth401RetryCount: parsed.step9Auth401RetryCount ?? 0,
     };

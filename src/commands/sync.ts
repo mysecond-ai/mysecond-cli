@@ -38,9 +38,11 @@ import { maybePrintPluginRefreshNudge } from '../lib/plugin-refresh-nag.js';
 import {
   scanArtifacts,
   scanContextFiles,
+  scanCustoms,
   type BasePluginFile,
   type CompanionFile,
   type ContextFile,
+  type ContextFilePayload,
 } from '../lib/payload.js';
 import {
   CLAUDE_MD_MARKER_END,
@@ -81,6 +83,9 @@ interface SyncSummary {
   workflowsUpdated: number;
   artifactsPushed: number;
   contextFilesPushed: number;
+  // Customs catch-up sweep — count of .claude/{agents,skills,workflows} the
+  // sweep pushed UP this run (team-shared tools authored/edited locally).
+  customsPushed: number;
   claudeMdUpdated: boolean;
   npmUpdateRan: boolean;
   // Workstream H — base plugin update counters. baseSkippedDueToCustomization
@@ -112,6 +117,7 @@ function emptySummary(): SyncSummary {
     workflowsUpdated: 0,
     artifactsPushed: 0,
     contextFilesPushed: 0,
+    customsPushed: 0,
     claudeMdUpdated: false,
     npmUpdateRan: false,
     baseSkillsUpdated: 0,
@@ -413,6 +419,103 @@ async function upSyncContextFiles(
   return result.synced;
 }
 
+// Customs catch-up sweep. The realtime `artifact-sync` hook pushes customs the
+// instant they're written; this sweep reconciles anything that hook missed
+// (created before the hook installed, an older CLI, a non-Write creation path,
+// a transient failure). Same endpoint as context files (POST
+// /api/companion/files); the Part-A receiver lands them team-shared.
+//
+// Fail CLOSED to avoid flooding context_files with the entire stock catalog as
+// per-team rows. A custom is pushed ONLY when its content matches NOTHING the
+// server is known to have for that path — not the install-state base hash
+// (pristine stock we wrote), not the context_files channel's last cloud/local
+// hash (team customs + Part-A `origin='created'` rows arrive that way), and not
+// a prior sweep push. A file we have NEVER tracked is treated as a net-new
+// local custom and pushed — EXCEPT when install-state is empty (cold/never
+// base-synced), where we can't tell a hand-authored custom from un-recorded
+// stock, so we skip. The realtime hook still covers fresh authoring there.
+// Flood backstop for the never-tracked bucket. Hand-authored customs come in
+// handfuls; an un-recorded slice of the stock catalog (a partial/interrupted
+// base sync) is large. Above this many UNTRACKED files we treat the batch as a
+// likely stock flood and skip the untracked bucket rather than risk seeding the
+// stock catalog as per-team context_files rows. Set well above any realistic
+// hand-authored customs set, below a catalog flood. Edits to ALREADY-tracked
+// files are never capped (bounded by real customizations) and always push.
+const MAX_UNTRACKED_CUSTOMS_PER_SWEEP = 100;
+
+export function selectCustomsToSync(
+  rootDir: string,
+  state: SyncState,
+  installState: InstallState
+): ContextFilePayload[] {
+  const customs = scanCustoms(rootDir);
+  if (customs.length === 0) return [];
+  const installEmpty = Object.keys(installState.files).length === 0;
+
+  const knownOnServer = (f: ContextFilePayload): boolean => {
+    // Already on the server with this exact content (pristine stock,
+    // just-downsynced custom, or already pushed by a prior sweep).
+    if (installState.files[f.file_path] === f.current_hash) return true;
+    const cf = state.files[f.file_path];
+    if (cf && (cf.cloudHash === f.current_hash || cf.localHash === f.current_hash)) return true;
+    const c = state.customs[f.file_path];
+    if (c && c.hash === f.current_hash) return true;
+    return false;
+  };
+  const isUntracked = (f: ContextFilePayload): boolean =>
+    installState.files[f.file_path] === undefined &&
+    state.files[f.file_path] === undefined &&
+    state.customs[f.file_path] === undefined;
+
+  // Content diverges from everything known-on-server → a user edit OR a net-new
+  // custom. Split so the flood backstop only ever gates the ambiguous bucket.
+  const candidates = customs.filter((f) => !knownOnServer(f));
+  const trackedEdits = candidates.filter((f) => !isUntracked(f)); // edits to known files — bounded
+  const untracked = candidates.filter(isUntracked); // net-new local custom OR un-recorded stock
+
+  // Cold/partial-state flood guard: an empty install-state can't tell a
+  // hand-authored custom from un-recorded stock at all; a too-large untracked
+  // batch under a non-empty install-state looks like a catalog flood, not
+  // hand-authored customs. In either case skip the untracked bucket — the
+  // realtime hook still covers genuine fresh authoring on the next edit.
+  const floodRisk =
+    installEmpty || untracked.length > MAX_UNTRACKED_CUSTOMS_PER_SWEEP;
+  return floodRisk ? trackedEdits : [...trackedEdits, ...untracked];
+}
+
+// Returns the synced count plus the ledger entries to persist — the caller
+// merges `pushed` into sync-state (under a lock where concurrency matters).
+// Pure w.r.t. `state`: it does NOT mutate it, so the same selection logic is
+// safe across runSync / --push-all / --push-only without surprise side effects.
+async function upSyncCustoms(
+  ctx: CommandContext,
+  state: SyncState,
+  installState: InstallState
+): Promise<{ synced: number; pushed: Record<string, SyncStateContextEntry> }> {
+  const pushed: Record<string, SyncStateContextEntry> = {};
+  const toSync = selectCustomsToSync(ctx.rootDir, state, installState);
+  if (toSync.length === 0) return { synced: 0, pushed };
+
+  const result = await contextFilesPush(ctx, toSync, silentSyncOpts(ctx));
+  // Record once the server returns a per-file VERDICT — accepted (synced),
+  // already-current (skipped), OR a per-file rejection in errors[] (e.g.
+  // cannot_overwrite_stock for a non-admin shadowing a stock slug). Recording
+  // rejections too stops them re-pushing every sweep AND stops a mixed batch
+  // re-sending its accepted files; a future CONTENT change (hash) re-attempts.
+  // A transient whole-request failure returns {synced:0,skipped:0,errors:[]}
+  // (contextFilesPush maps HTTP>=400 to that) or THROWS — neither records, so
+  // those genuinely retry.
+  const gotVerdict =
+    result.synced > 0 || result.skipped > 0 || (result.errors?.length ?? 0) > 0;
+  if (gotVerdict) {
+    const now = new Date().toISOString();
+    for (const f of toSync) {
+      pushed[f.file_path] = { hash: f.current_hash, pushedAt: now };
+    }
+  }
+  return { synced: result.synced, pushed };
+}
+
 function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   // CAIO finding: stderr from SessionStart hooks is silently dropped on exit 0.
   // Customer-relevant messages MUST go to stdout when ctx.silent so Claude sees
@@ -429,6 +532,7 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
     if (summary.workflowsUpdated > 0) parts.push(`${summary.workflowsUpdated} workflows`);
     if (summary.artifactsPushed > 0) parts.push(`${summary.artifactsPushed} artifacts pushed`);
     if (summary.contextFilesPushed > 0) parts.push(`${summary.contextFilesPushed} context files pushed`);
+    if (summary.customsPushed > 0) parts.push(`${summary.customsPushed} team tools shared`);
     const conflicts =
       summary.conflictsCloudKept + summary.conflictsLocalKept + summary.conflictsSkipped;
     if (conflicts > 0) parts.push(`${conflicts} conflicts (see .claude/sync-conflicts/)`);
@@ -472,6 +576,8 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   if (summary.workflowsUpdated) parts.push(`${summary.workflowsUpdated} workflows`);
   if (summary.artifactsPushed) parts.push(`${summary.artifactsPushed} artifacts pushed`);
   if (summary.contextFilesPushed) parts.push(`${summary.contextFilesPushed} context files pushed`);
+  if (summary.customsPushed)
+    parts.push(`${summary.customsPushed} team tool(s) shared (visible to your whole team)`);
   if (summary.claudeMdUpdated) parts.push('CLAUDE.md updated');
   if (summary.baseSkillsUpdated)
     parts.push(`${summary.baseSkillsUpdated} skills updated from mysecond.ai`);
@@ -578,11 +684,44 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
   const contextFiles = scanContextFiles(ctx.rootDir);
   const artifacts = scanArtifacts(ctx.rootDir);
 
+  // Customs (.claude/{agents,skills,workflows}) — run FIRST so a customs-only
+  // repair (no context/ or work outputs) still pushes instead of no-op'ing on
+  // the empty-files early return below. Same fail-closed selection as the
+  // SessionStart sweep; pristine stock is never re-uploaded. Best-effort — a
+  // customs failure never changes the context-file exit gate.
+  let customsSynced = 0;
+  try {
+    const state = readSyncState(ctx.rootDir);
+    const installState = readInstallState(ctx.rootDir);
+    const r = await upSyncCustoms(ctx, state, installState);
+    if (Object.keys(r.pushed).length > 0) {
+      // Locked read-modify-write: never clobber a concurrent hook's sync-state
+      // keys (mirrors runPushOnly). Persists skipped/rejected verdicts too.
+      await updateSyncState(ctx.rootDir, (s) => {
+        Object.assign((s.customs ??= {}), r.pushed);
+      });
+    }
+    customsSynced = r.synced;
+    if (r.synced > 0) {
+      process.stdout.write(
+        `mysecond: pushed ${r.synced} team tool(s) (visible to your whole team).\n`
+      );
+    }
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: customs push failed (${err instanceof Error ? err.message : String(err)}).\n`
+      );
+    }
+  }
+
   if (contextFiles.length === 0 && artifacts.length === 0) {
-    process.stdout.write(
-      'mysecond: no local context/ or work output files found to push.\n' +
-        '  Run /welcome in Claude Code to create your context files first.\n'
-    );
+    if (customsSynced === 0) {
+      process.stdout.write(
+        'mysecond: no local context/ or work output files found to push.\n' +
+          '  Run /welcome in Claude Code to create your context files first.\n'
+      );
+    }
     return 0;
   }
 
@@ -657,10 +796,12 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
  */
 export async function runPushOnly(ctx: CommandContext): Promise<number> {
   const state = readSyncState(ctx.rootDir);
+  const installState = readInstallState(ctx.rootDir);
   const opts = silentSyncOpts(ctx);
 
   const pushedArtifacts: Record<string, SyncStateArtifactEntry> = {};
   const pushedContext: Record<string, SyncStateContextEntry> = {};
+  const pushedCustoms: Record<string, SyncStateContextEntry> = {};
 
   // Artifacts (work outputs). scanArtifacts is hardened (size-capped + skips
   // unreadable files) so a single bad file can't fail the whole turn sweep.
@@ -726,14 +867,31 @@ export async function runPushOnly(ctx: CommandContext): Promise<number> {
     }
   }
 
+  // Customs (.claude/{agents,skills,workflows}). Redundant with the per-Write
+  // `artifact-sync` hook in the common case, but catches a custom written in a
+  // turn that didn't fire that hook. Same fail-closed selection + record-on-
+  // verdict semantics as the SessionStart sweep (shared upSyncCustoms).
+  try {
+    const r = await upSyncCustoms(ctx, state, installState);
+    Object.assign(pushedCustoms, r.pushed);
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: customs push-only failed (${err instanceof Error ? err.message : String(err)}).\n`
+      );
+    }
+  }
+
   const artifactCount = Object.keys(pushedArtifacts).length;
   const contextCount = Object.keys(pushedContext).length;
-  if (artifactCount > 0 || contextCount > 0) {
+  const customsCount = Object.keys(pushedCustoms).length;
+  if (artifactCount > 0 || contextCount > 0 || customsCount > 0) {
     // Persist ONLY the keys we pushed, merged onto a freshly-read state under
     // lock — never overwrite hashes a concurrent writer recorded.
     await updateSyncState(ctx.rootDir, (s) => {
       Object.assign(s.artifacts, pushedArtifacts);
       Object.assign(s.contextFiles, pushedContext);
+      Object.assign((s.customs ??= {}), pushedCustoms);
     });
     // stdout so Claude (which reads hook stdout as context) can note the sync.
     // Emitted only when something was actually pushed — the common no-change
@@ -741,6 +899,7 @@ export async function runPushOnly(ctx: CommandContext): Promise<number> {
     const parts: string[] = [];
     if (artifactCount > 0) parts.push(`${artifactCount} artifact(s)`);
     if (contextCount > 0) parts.push(`${contextCount} context file(s)`);
+    if (customsCount > 0) parts.push(`${customsCount} team tool(s)`);
     process.stdout.write(`mysecond: pushed ${parts.join(' + ')}.\n`);
   }
 
@@ -957,6 +1116,21 @@ export async function runSync(
     if (!ctx.silent) {
       process.stderr.write(
         `mysecond: context-file up-sync failed (${err instanceof Error ? err.message : String(err)}). Down-sync OK.\n`
+      );
+    }
+  }
+
+  // Customs catch-up sweep. installState is fully populated by the base
+  // down-sync above (syncBaseTree), so by here it reflects every stock file we
+  // wrote — the fail-closed gate in selectCustomsToSync relies on that.
+  try {
+    const customsResult = await upSyncCustoms(ctx, state, installState);
+    Object.assign(state.customs, customsResult.pushed);
+    summary.customsPushed = customsResult.synced;
+  } catch (err) {
+    if (!ctx.silent) {
+      process.stderr.write(
+        `mysecond: customs up-sync failed (${err instanceof Error ? err.message : String(err)}). Down-sync OK.\n`
       );
     }
   }

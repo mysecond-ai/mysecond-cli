@@ -308,6 +308,68 @@ export function scanContextFiles(rootDir: string): ContextFilePayload[] {
   return found;
 }
 
+// Customs catch-up sweep (SessionStart / --push-all / --push-only). Walk the
+// three on-disk customs roots and emit a ContextFilePayload per file that
+// `isCustomsArtifact` accepts — the SAME shape + endpoint the realtime
+// `artifact-sync` hook pushes (POST /api/companion/files). This is pure: the
+// fail-closed "is this already on the server / is it pristine stock?" decision
+// lives in the caller (upSyncCustoms in sync.ts), where install-state and
+// sync-state are in scope. Mirrors scanContextFiles (size guard, dotfile skip).
+//
+// We stamp authored_by so a sweep-pushed custom carries the same provenance the
+// realtime hook stamps. The receiver also records the real pushing member
+// server-side, so authored_by is provenance, not authority.
+const CUSTOMS_ROOTS = ['.claude/agents', '.claude/skills', '.claude/workflows'] as const;
+
+export function scanCustoms(rootDir: string): ContextFilePayload[] {
+  const found: ContextFilePayload[] = [];
+  for (const root of CUSTOMS_ROOTS) {
+    const dir = join(rootDir, root);
+    if (!existsSync(dir)) continue;
+    walkCustomsDir(rootDir, dir, found);
+  }
+  return found;
+}
+
+function walkCustomsDir(
+  rootDir: string,
+  currentDir: string,
+  results: ContextFilePayload[]
+): void {
+  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+    // Skip dotfiles/dotdirs — scratch files shouldn't leak to the server.
+    if (entry.name.startsWith('.')) continue;
+    const fullPath = join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      walkCustomsDir(rootDir, fullPath, results);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    const rel = relative(rootDir, fullPath);
+    // Enforce the canonical customs shape (agents flat, skills/workflows nested)
+    // so stray .md files under these roots don't sync as malformed customs.
+    if (!isCustomsArtifact(rel)) continue;
+
+    let content: string;
+    try {
+      // stat first — readFileSync on a huge file would OOM the SessionStart
+      // hook before the size check. Read only after the size is known sane.
+      const stat = statSync(fullPath);
+      if (stat.size === 0 || stat.size > CONTEXT_PER_FILE_LIMIT) continue;
+      content = readFileSync(fullPath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    results.push({
+      file_path: rel,
+      content,
+      current_hash: shortHash(content),
+      authored_by: buildAuthoredBy(),
+    });
+  }
+}
+
 function walkContextDir(
   rootDir: string,
   currentDir: string,
