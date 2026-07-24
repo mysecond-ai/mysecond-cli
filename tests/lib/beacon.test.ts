@@ -77,6 +77,16 @@ describe('emitBeacon', () => {
     ).resolves.toBeUndefined();
   })
 
+  it('MYSECOND_NO_BEACON=1 disables emission entirely (test-suite hermeticity)', async () => {
+    process.env.MYSECOND_NO_BEACON = '1';
+    try {
+      await emitBeacon({ apiBase: 'https://app.mysecond.ai', installId: 'x', stage: 'cli_started' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.MYSECOND_NO_BEACON;
+    }
+  })
+
   it('passes an abort signal bounded by BEACON_TIMEOUT_MS', async () => {
     await emitBeacon({ apiBase: 'https://app.mysecond.ai', installId: 'x', stage: 'cli_started' });
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];

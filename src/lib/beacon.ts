@@ -44,8 +44,15 @@ export interface BeaconInput {
 /**
  * POST one beacon event. Resolves (never rejects) when the request settles
  * or the timeout fires — whichever comes first.
+ *
+ * MYSECOND_NO_BEACON=1 disables emission entirely — set by the test suite
+ * (tests spawn the REAL built binary; without this, every local/CI run
+ * would POST wrong_window/cli_started events to production and pollute the
+ * install funnel the beacon exists to measure). Same pattern as
+ * MYSECOND_NO_KEYCHAIN.
  */
 export async function emitBeacon(input: BeaconInput): Promise<void> {
+  if (process.env.MYSECOND_NO_BEACON === '1') return;
   try {
     const url = new URL('/api/companion/install-beacon', input.apiBase);
     await fetch(url, {

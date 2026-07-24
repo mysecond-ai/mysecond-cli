@@ -144,6 +144,31 @@ describe('runInit beacons', () => {
     expect((sandbox![0] as { errorClass?: string }).errorClass).toBe('EACCES');
   });
 
+  it('holds cli_started until delivery — fast-exit runs cannot lose it (round-2 P2)', async () => {
+    // Reproduced live in review: the --auth-only reuse path exits in ms and
+    // a bare `void` beacon never left the machine. runInit must not resolve
+    // before the held beacon settles.
+    let beaconSettled = false;
+    h.emitBeacon.mockImplementation(
+      () =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            beaconSettled = true;
+            resolve();
+          }, 30)
+        ) as Promise<undefined>
+    );
+    const code = await runInit(makeCtx({ authOnly: true }));
+    expect(code).toBe(0);
+    expect(beaconSettled).toBe(true);
+  });
+
+  it('--dry-run emits NO beacons (synthetic runs must not pollute the funnel)', async () => {
+    const code = await runInit(makeCtx({ dryRun: true }));
+    expect(code).toBe(0);
+    expect(h.emitBeacon).not.toHaveBeenCalled();
+  });
+
   it('non-permission write failures (e.g. ENOSPC) do NOT claim sandbox', async () => {
     const err = new Error('ENOSPC') as NodeJS.ErrnoException;
     err.code = 'ENOSPC';
