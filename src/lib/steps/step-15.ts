@@ -267,6 +267,17 @@ function buildResumeCommand(slug: string): string {
   const isOwnedFallbackLayout = /\/\.mysecond\/cli\/[^/]+\/[^/]+\.(?:mjs|cjs)$/.test(normalized);
   const isFallbackInstall =
     isOwnedFallbackLayout || process.env.MYSECOND_FALLBACK === '1';
+  // TLS-handoff continuity (install-wall PR-E review P1, cross-repo): on
+  // TLS-intercepted networks the fallback installer exports
+  // NODE_EXTRA_CA_CERTS before running Step 1 — but Step 2 runs in a FRESH
+  // shell from this printed hint. Without re-exporting, the customer passes
+  // auth and then dies on the resume's first fetch with the exact error the
+  // installer just fixed. The value is quoted (paths can contain spaces).
+  const caCerts = process.env.NODE_EXTRA_CA_CERTS;
+  const envPrefix =
+    caCerts !== undefined && caCerts !== ''
+      ? `NODE_EXTRA_CA_CERTS="${caCerts}" `
+      : '';
   if (isFallbackInstall && scriptPath.length > 0) {
     // Path is double-quoted: macOS home dirs can contain spaces
     // ("/Users/Ron Yang/…") and an unquoted path splits at the space —
@@ -274,9 +285,9 @@ function buildResumeCommand(slug: string): string {
     // (codex P1). Bash-syntax hint is deliberate: the paste instructs the
     // agent to run commands via the Bash tool; a PowerShell-native hint
     // ships with the Windows paste variant (PR-G).
-    return `MYSECOND_CUSTOMER_SLUG=${slug} node "${scriptPath}" init --resume`;
+    return `${envPrefix}MYSECOND_CUSTOMER_SLUG=${slug} node "${scriptPath}" init --resume`;
   }
-  return `MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@${__VERSION__} init --resume`;
+  return `${envPrefix}MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@${__VERSION__} init --resume`;
 }
 
 function printResumeHint(slug: string): void {
