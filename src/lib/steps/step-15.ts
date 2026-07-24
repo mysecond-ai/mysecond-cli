@@ -260,10 +260,21 @@ function printAuthBanner(
 function buildResumeCommand(slug: string): string {
   const scriptPath = process.argv[1] ?? '';
   const normalized = scriptPath.split('\\').join('/');
+  // Owned fallback layout ONLY: ~/.mysecond/cli/<version>/<entry file>.
+  // A bare `includes('/.mysecond/cli/')` would false-positive on any nested
+  // cache path under that prefix (codex P2) and route a working-npx customer
+  // to the node form.
+  const isOwnedFallbackLayout = /\/\.mysecond\/cli\/[^/]+\/[^/]+\.(?:mjs|cjs)$/.test(normalized);
   const isFallbackInstall =
-    normalized.includes('/.mysecond/cli/') || process.env.MYSECOND_FALLBACK === '1';
+    isOwnedFallbackLayout || process.env.MYSECOND_FALLBACK === '1';
   if (isFallbackInstall && scriptPath.length > 0) {
-    return `MYSECOND_CUSTOMER_SLUG=${slug} node ${scriptPath} init --resume`;
+    // Path is double-quoted: macOS home dirs can contain spaces
+    // ("/Users/Ron Yang/…") and an unquoted path splits at the space —
+    // breaking the customer's SECOND command after a successful auth
+    // (codex P1). Bash-syntax hint is deliberate: the paste instructs the
+    // agent to run commands via the Bash tool; a PowerShell-native hint
+    // ships with the Windows paste variant (PR-G).
+    return `MYSECOND_CUSTOMER_SLUG=${slug} node "${scriptPath}" init --resume`;
   }
   return `MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@${__VERSION__} init --resume`;
 }

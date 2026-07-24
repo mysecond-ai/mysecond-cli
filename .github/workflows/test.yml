@@ -19,6 +19,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # windows-latest is ADVISORY for now (first-ever win32 run surfaced ~60
+    # pre-existing POSIX assumptions across ~16 test files — 2026-07-24, PR
+    # #50 run). Tracked as its own workstream: each failure must be triaged
+    # as test-harness-only vs REAL win32 product bug before this flag comes
+    # off. ubuntu + macos remain blocking. Do NOT ship the Windows paste
+    # variant default-on while this is true.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

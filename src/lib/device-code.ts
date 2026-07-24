@@ -90,21 +90,34 @@ export function getOrCreateInstallId(): string {
   if (existsSync(path)) {
     try {
       const raw = readFileSync(path, 'utf8').trim();
-      if (raw.length > 0 && raw.length <= 128) return raw;
+      if (raw.length > 0 && raw.length <= 128) {
+        // Successful read = home IS writable/readable now; clear any error a
+        // prior call recorded so a later beacon can't falsely claim sandbox
+        // (codex P2: stale-error path).
+        lastInstallIdWriteError = null;
+        return raw;
+      }
     } catch {
       // fall through to mint a new one
     }
   }
   const id = randomUUID();
   try {
+    // DELIBERATE semantics change vs pre-install-wall (codex noted it):
+    // mkdirSync used to sit OUTSIDE the try, so an unwritable home dir
+    // CRASHED the CLI before minting anything. Now both mkdir and write are
+    // best-effort: a sandboxed machine proceeds with an in-memory id and the
+    // install continues as far as the environment allows. Tradeoff, accepted:
+    // separate processes on such a machine (auth-only, then resume) each mint
+    // a DIFFERENT in-memory id, splitting their PostHog person — measurable
+    // beats crashed.
     mkdirSync(dir, { recursive: true });
     writeFileSync(path, id + '\n', { mode: 0o600 });
     lastInstallIdWriteError = null;
   } catch (err) {
-    // Best-effort — return the in-memory value either way. Record the
-    // failure: EACCES/EPERM on ~/.mysecond is the fingerprint of Claude
-    // Code's sandbox filesystem isolation (writes allowed only in CWD +
-    // session TMPDIR), which also blocks the marketplace install later.
+    // Record the failure: EACCES/EPERM on ~/.mysecond is the fingerprint of
+    // Claude Code's sandbox filesystem isolation (writes allowed only in CWD
+    // + session TMPDIR), which also blocks the marketplace install later.
     // init-runner beacons `sandbox_suspected` off this (install-wall plan).
     lastInstallIdWriteError = err as NodeJS.ErrnoException;
   }
