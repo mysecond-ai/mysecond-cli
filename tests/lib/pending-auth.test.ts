@@ -8,6 +8,8 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
+
 import {
   clearPendingAuth,
   isPendingAuthExpired,
@@ -19,20 +21,19 @@ import {
 import { pendingAuthPath } from '../../src/lib/mysecond-paths.js';
 
 describe('pending-auth state', () => {
-  let prevHome: string | undefined;
+  let fake: FakeHome;
   let projectDir: string;
 
   beforeEach(() => {
-    prevHome = process.env.HOME;
-    // Sandbox HOME so we don't pollute the real ~/.mysecond.
-    const sandboxHome = mkdtempSync(join(tmpdir(), 'mysecond-pending-auth-'));
-    process.env.HOME = sandboxHome;
+    // Sandbox the home dir so we don't pollute the real ~/.mysecond.
+    // installFakeHome sets BOTH HOME and USERPROFILE — os.homedir() reads
+    // USERPROFILE on win32, so setting only HOME sandboxed nothing there.
+    fake = installFakeHome('mysecond-pending-auth-');
     projectDir = mkdtempSync(join(tmpdir(), 'mysecond-project-'));
   });
 
   afterEach(() => {
-    if (prevHome !== undefined) process.env.HOME = prevHome;
-    else delete process.env.HOME;
+    fake.restore();
   });
 
   function sampleState(overrides: Partial<PendingAuthState> = {}): PendingAuthState {
@@ -57,7 +58,9 @@ describe('pending-auth state', () => {
     expect(read).toEqual(state);
   });
 
-  it('persists at chmod 0600', () => {
+  // skipIf win32: NTFS cannot express POSIX mode bits — chmod(0600) is a
+  // partial no-op there, so the 0o600 assertion can never hold on Windows.
+  it.skipIf(process.platform === 'win32')('persists at chmod 0600', () => {
     writePendingAuth(projectDir, sampleState());
     const path = pendingAuthPath(projectDir);
     const stat = statSync(path);

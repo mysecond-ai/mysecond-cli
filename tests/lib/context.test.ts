@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildContext, parseGlobalFlags, _legacyKeyWarningResetForTests } from '../../src/lib/context.js';
 import { projectHash } from '../../src/lib/project-hash.js';
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
 
 // Plant a project-scoped credentials file at the path getProjectScopedCredsPath
-// would resolve to under an isolated $HOME. On macOS, getDeviceToken first
+// would resolve to under an isolated fake home (installFakeHome sets both
+// HOME and USERPROFILE, so this holds on win32 too). On macOS, getDeviceToken first
 // probes the system keychain via `security`, but the account name is
 // derived from projectHash(projectDir) — a tmp dir hash has effectively
 // zero probability of colliding with a real keychain entry, so the probe
@@ -81,13 +83,15 @@ describe('parseGlobalFlags', () => {
 });
 
 describe('buildContext', () => {
-  let savedHome: string | undefined;
+  // installFakeHome sets BOTH HOME and USERPROFILE — os.homedir() reads
+  // USERPROFILE on win32, so HOME-only isolation sandboxed nothing there.
+  let fakeHome: FakeHome;
   let savedKey: string | undefined;
   let savedUrl: string | undefined;
   let savedClaudeDir: string | undefined;
 
   beforeEach(() => {
-    savedHome = process.env.HOME;
+    fakeHome = installFakeHome('mysecond-ctx-');
     savedKey = process.env.COMPANION_API_KEY;
     savedUrl = process.env.COMPANION_API_URL;
     savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
@@ -97,8 +101,7 @@ describe('buildContext', () => {
   });
 
   afterEach(() => {
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
+    fakeHome.restore();
     if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
     else process.env.COMPANION_API_KEY = savedKey;
     if (savedUrl === undefined) delete process.env.COMPANION_API_URL;
@@ -157,8 +160,10 @@ describe('buildContext', () => {
 // The structured marker `[mysecond:legacy-key-detected] source=...` is a
 // stable public contract (semver gates format changes).
 describe('buildContext — v1.4.4 legacy-key warning', () => {
+  // Fake home (HOME + USERPROFILE) so the keychain/file fallback can never
+  // pick up a real device token from the machine running the tests.
+  let fakeHome: FakeHome;
   let savedKey: string | undefined;
-  let savedHome: string | undefined;
   let savedClaudeDir: string | undefined;
   let stderrBuf: string;
   let stderrSpy: ReturnType<typeof captureStderr>;
@@ -179,8 +184,8 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
   }
 
   beforeEach(() => {
+    fakeHome = installFakeHome('mysecond-ctx-');
     savedKey = process.env.COMPANION_API_KEY;
-    savedHome = process.env.HOME;
     savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
     delete process.env.COMPANION_API_KEY;
     delete process.env.CLAUDE_PROJECT_DIR;
@@ -191,10 +196,9 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
 
   afterEach(() => {
     stderrSpy.restore();
+    fakeHome.restore();
     if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
     else process.env.COMPANION_API_KEY = savedKey;
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
     if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = savedClaudeDir;
   });
@@ -244,9 +248,9 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
 
   it('stays silent when no token is configured', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    // HOME isolated so the keychain/file fallback can't pick up a real
-    // device token from the developer running the tests.
-    process.env.HOME = tmp;
+    // Home is isolated by installFakeHome in beforeEach (HOME + USERPROFILE),
+    // so the keychain/file fallback can't pick up a real device token from
+    // the developer running the tests.
     buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(stderrBuf).toBe('');
   });
@@ -277,9 +281,9 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
     //
     // We can't easily plant a synthetic non-msd_ keychain value without
     // mocking keychain.ts internals. Instead assert structurally: with no
-    // env and no flag, the warning helper is unreachable.
+    // env and no flag, the warning helper is unreachable. (Home is isolated
+    // by installFakeHome in beforeEach.)
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(stderrBuf).toBe('');
   });
@@ -297,9 +301,12 @@ describe('buildContext — v1.4.4 legacy-key warning', () => {
 // --api-key flag is an explicit override and is NEVER rescued — passing a
 // legacy flag value means the user wants that value, even if it 401s.
 describe('buildContext — v1.4.4 keychain rescue', () => {
+  // Fake home (HOME + USERPROFILE — os.homedir() reads USERPROFILE on
+  // win32). Tokens are planted under fakeHome.home; the project dir stays
+  // a separate per-test tmp dir, matching how real installs look.
+  let fakeHome: FakeHome;
   let savedKey: string | undefined;
   let savedUrl: string | undefined;
-  let savedHome: string | undefined;
   let savedClaudeDir: string | undefined;
   let stderrBuf: string;
   let origWrite: typeof process.stderr.write;
@@ -317,9 +324,9 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // here. The "shell URL wins" test below sets it explicitly, and
     // without the restore it leaks into later cases (shuffled or in this
     // file) and silently masks default/recovered URL behavior.
+    fakeHome = installFakeHome('mysecond-ctx-');
     savedKey = process.env.COMPANION_API_KEY;
     savedUrl = process.env.COMPANION_API_URL;
-    savedHome = process.env.HOME;
     savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
     delete process.env.COMPANION_API_KEY;
     delete process.env.COMPANION_API_URL;
@@ -331,30 +338,27 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
 
   afterEach(() => {
     process.stderr.write = origWrite;
+    fakeHome.restore();
     if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
     else process.env.COMPANION_API_KEY = savedKey;
     if (savedUrl === undefined) delete process.env.COMPANION_API_URL;
     else process.env.COMPANION_API_URL = savedUrl;
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
     if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
     else process.env.CLAUDE_PROJECT_DIR = savedClaudeDir;
   });
 
   it('prefers keychain msd_ token over legacy COMPANION_API_KEY env value', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
-    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_fresh_device_token_xyz');
     const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(ctx.apiKey).toBe('msd_fresh_device_token_xyz');
   });
 
   it('emits the keychain-rescue marker when rescuing a legacy env value', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
-    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_fresh_device_token_xyz');
     buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
     expect(stderrBuf).toContain('Unset COMPANION_API_KEY in your shell');
@@ -364,9 +368,8 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // The rescue path touches both the legacy env value and the rescued
     // msd_ token. Neither should appear in stderr.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_secret_envvalue';
-    plantKeychainTokenForTest(tmp, tmp, 'msd_secret_keychain_value');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_secret_keychain_value');
     buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(stderrBuf).not.toContain('companion_legacy_secret_envvalue');
     expect(stderrBuf).not.toContain('msd_secret_keychain_value');
@@ -379,8 +382,7 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // even though keychain has a fresher msd_ token. Emit the original
     // warning (source=flag), not the rescue variant.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
-    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_fresh_device_token_xyz');
     const ctx = buildContext(
       parseGlobalFlags(['--project-dir', tmp, '--api-key', 'companion_legacy_abc123'])
     );
@@ -393,9 +395,8 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // An msd_-prefixed env value is legitimate (e.g., test fixture, CI).
     // Keep the env value, do not switch to keychain, emit nothing.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'msd_env_token_abc';
-    plantKeychainTokenForTest(tmp, tmp, 'msd_keychain_token_xyz');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_keychain_token_xyz');
     const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(ctx.apiKey).toBe('msd_env_token_abc');
     expect(stderrBuf).toBe('');
@@ -405,7 +406,6 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // No keychain entry → no rescue possible. Original v1.4.4 warning
     // fires with source=env (not keychain-rescue=true).
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
     const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
     expect(ctx.apiKey).toBe('companion_legacy_abc123');
@@ -423,10 +423,9 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // becomes the multi-line dotenv blob and /whoami gets a malformed
     // Authorization header.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     // No COMPANION_API_KEY in env (already deleted in beforeEach).
     plantKeychainTokenForTest(
-      tmp,
+      fakeHome.home,
       tmp,
       'COMPANION_API_KEY=msd_unset_path_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
     );
@@ -447,11 +446,10 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // token would be sent to https://app.mysecond.ai (production default)
     // and 401-loop. Codex pass-3 P2.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
     delete process.env.COMPANION_API_URL; // ensure file fallback wins
     plantKeychainTokenForTest(
-      tmp,
+      fakeHome.home,
       tmp,
       'COMPANION_API_KEY=msd_staging_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
     );
@@ -466,11 +464,10 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // via `export COMPANION_API_URL=http://localhost:3000` expects that
     // to stick even if the keychain holds a staging URL.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
     process.env.COMPANION_API_URL = 'http://localhost:3000';
     plantKeychainTokenForTest(
-      tmp,
+      fakeHome.home,
       tmp,
       'COMPANION_API_KEY=msd_staging_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
     );
@@ -487,10 +484,9 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // because `startsWith('msd_')` doesn't match the dotenv envelope.
     // Codex P2 follow-up on PR #28 — normalize before the prefix check.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
     plantKeychainTokenForTest(
-      tmp,
+      fakeHome.home,
       tmp,
       'COMPANION_API_KEY=msd_dotenv_format_xyz\nCOMPANION_API_URL=https://app.mysecond.ai\n'
     );
@@ -506,10 +502,9 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     // stored value is just as stale as the env var. Original
     // legacy-key warning fires, not the rescue variant.
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
     plantKeychainTokenForTest(
-      tmp,
+      fakeHome.home,
       tmp,
       'COMPANION_API_KEY=companion_legacy_stored\nCOMPANION_API_URL=https://app.mysecond.ai\n'
     );
@@ -520,9 +515,8 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
 
   it('rescue marker suppresses prose under --silent but emits the marker', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
-    process.env.HOME = tmp;
     process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
-    plantKeychainTokenForTest(tmp, tmp, 'msd_fresh_device_token_xyz');
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_fresh_device_token_xyz');
     buildContext(parseGlobalFlags(['--project-dir', tmp, '--silent']));
     expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
     expect(stderrBuf).not.toContain('Unset COMPANION_API_KEY in your shell');
