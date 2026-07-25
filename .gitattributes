@@ -1,0 +1,14 @@
+# LF everywhere, on every platform (win32 triage PR 3, 2026-07).
+#
+# Windows git's default autocrlf converts LF→CRLF at checkout, which breaks
+# anything that hashes or greps file CONTENT: the sync engine's shortHash
+# (a CRLF checkout would re-push every file with different hashes than the
+# team's POSIX rows), and structural source-text tests. The repo is
+# authored LF-only; make that explicit so checkouts are byte-identical on
+# every platform.
+* text=auto eol=lf
+
+# Windows batch files are the one CRLF-required exception (cmd.exe parses
+# CRLF; a LF-only .cmd can misparse labels/blocks).
+*.cmd text eol=crlf
+*.bat text eol=crlf
