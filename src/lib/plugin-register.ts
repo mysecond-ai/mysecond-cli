@@ -68,6 +68,12 @@ function spawnTimedOut(r: ReturnType<typeof spawnSync>): boolean {
 }
 
 function isEnoent(r: ReturnType<typeof spawnSync>): boolean {
+  // Through the win32 shell path (spawnClaude → cmd /c for .cmd shims) a
+  // vanished binary can never produce error.code='ENOENT' — cmd.exe exits
+  // 9009 ("not recognized") instead. Without this, binary_not_found (and its
+  // friendly "re-open Claude Code, then retry" message) silently degrades to
+  // a generic non-zero failure (stack review P3-1).
+  if (r.status === 9009) return true;
   return (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 

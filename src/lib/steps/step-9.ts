@@ -330,7 +330,13 @@ async function doStep9(
   // now rare (it validates candidates), but the fallback path returns bare
   // 'claude', so keep the check. This throw is now DEGRADABLE (caught below):
   // the install continues and context still syncs.
-  if (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
+  // status 9009 = cmd.exe "not recognized" — the shell-path equivalent of
+  // ENOENT (spawnClaude uses cmd /c for .cmd shims; see plugin-register's
+  // isEnoent). Same friendly error either way.
+  if (
+    addResult.status === 9009 ||
+    (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT')
+  ) {
     throw new MysecondError(
       6,
       "Couldn't run the Claude Code CLI to register the PM OS plugin (binary not found). Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills."

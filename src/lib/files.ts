@@ -57,10 +57,15 @@ export function toPosixRel(rootDir: string, fullPath: string): string {
 // sync-state keys via the realtime hook); relative inputs are normalized the
 // same way since a win32 hook hands us backslash paths.
 export function relativeFromRoot(rootDir: string, filePath: string): string | null {
-  if (filePath.startsWith(rootDir + sep) || filePath === rootDir) {
-    return filePath.slice(rootDir.length + 1).split(sep).join('/');
+  if (isAbsolute(filePath)) {
+    // resolve() both sides before containment (stack review P2): a raw
+    // prefix check broke on a trailing-sep rootDir (CLAUDE_PROJECT_DIR of
+    // "C:\repo\" looked for "C:\repo\\") and on win32 drive-letter casing.
+    const rel = relative(resolve(rootDir), resolve(filePath));
+    if (rel === '') return null;
+    if (rel.startsWith('..') || isAbsolute(rel)) return null;
+    return rel.split(sep).join('/');
   }
-  if (isAbsolute(filePath)) return null;
   // Relative input — accept (normalized); downstream callers re-validate via
   // safePath, which handles '/' on every platform.
   return filePath.split(sep).join('/');

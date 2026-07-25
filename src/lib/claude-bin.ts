@@ -167,7 +167,18 @@ export function resolveClaudeBin(opts: ResolveClaudeBinOpts = {}): ResolvedClaud
 // unit-testable from any OS; spawnClaude is the thin executor every
 // call site uses.
 
-const CMD_METACHAR_RE = /[&|<>^%!"]/;
+// Hard refusal: only the truly unquotable — a double quote breaks our own
+// quoting, and CR/LF are command-separator injection primitives. NTFS
+// forbids `"` in paths, so no legal input is rejected.
+const CMD_UNQUOTABLE_RE = /["\r\n]/;
+// Quote trigger: whitespace or anything cmd.exe treats specially OUTSIDE
+// quotes. Inside double quotes cmd treats & | < > ^ ( ) , ; = literally, so
+// quoting neutralizes them — legal Windows profile dirs like C:\Users\R&D
+// must WORK, not be refused (stack review P1). Residual documented edges,
+// both quoted-through: `%` pairs expand only when they name a DEFINED env
+// var (undefined stays literal on the cmd line); `!` only matters under
+// delayed expansion, which cmd /c does not enable.
+const CMD_QUOTE_TRIGGER_RE = /[\s&|<>^%!(),;=]/;
 
 export interface ClaudeSpawnPlan {
   command: string;
@@ -184,15 +195,21 @@ export function buildClaudeSpawnPlan(
   if (!needsShell) {
     return { command: claudeBin, args, shell: false };
   }
-  for (const a of args) {
-    if (CMD_METACHAR_RE.test(a)) {
-      throw new Error(`refusing to shell-spawn claude with metacharacter arg: ${a}`);
+  for (const token of [claudeBin, ...args]) {
+    if (CMD_UNQUOTABLE_RE.test(token)) {
+      throw new Error(`refusing to shell-spawn claude with unquotable token: ${JSON.stringify(token)}`);
     }
   }
-  const quote = (v: string): string => (/[\s]/.test(v) ? `"${v}"` : v);
+  // The COMMAND is always quoted (stack review P1: an unquoted
+  // C:\Users\R&D\...\claude.cmd splits at `&`). Args are quoted when they
+  // carry whitespace or metachars — clean slugs/flags stay bare, which also
+  // keeps batch %* logging byte-stable for the fixtures. An empty arg
+  // becomes "" instead of silently vanishing from the cmd line.
+  const quoteArg = (v: string): string =>
+    v === '' || CMD_QUOTE_TRIGGER_RE.test(v) ? `"${v}"` : v;
   return {
-    command: quote(claudeBin),
-    args: args.map(quote),
+    command: `"${claudeBin}"`,
+    args: args.map(quoteArg),
     shell: true,
   };
 }

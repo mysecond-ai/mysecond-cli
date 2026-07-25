@@ -40,7 +40,9 @@ describe('buildClaudeSpawnPlan', () => {
     }
   });
 
-  it('win32 shell path: space-bearing paths are quoted (Node does NO quoting with shell:true)', () => {
+  it('win32 shell path: the COMMAND is ALWAYS quoted; space/metachar args are quoted too', () => {
+    // Stack review P1: an unquoted C:\\Users\\R&D\\...\\claude.cmd splits at
+    // `&` in cmd.exe. Quoting neutralizes & | < > ^ ( ) inside double quotes.
     const plan = buildClaudeSpawnPlan(
       'C:\\Users\\Ron Yang\\AppData\\npm\\claude.cmd',
       ['plugin', 'marketplace', 'add', 'C:\\Users\\Ron Yang\\.mysecond\\marketplace', '--scope', 'user'],
@@ -55,19 +57,45 @@ describe('buildClaudeSpawnPlan', () => {
       '--scope',
       'user',
     ]);
+    // No-space command still quoted; clean args stay bare.
+    const bare = buildClaudeSpawnPlan('C:\\npm\\claude.cmd', ['plugin', 'install', 'pm-os@m'], 'win32');
+    expect(bare.command).toBe('"C:\\npm\\claude.cmd"');
+    expect(bare.args).toEqual(['plugin', 'install', 'pm-os@m']);
   });
 
-  it('win32 shell path REFUSES cmd metacharacters — args are validated upstream; a metachar is a bug or injection, never valid', () => {
-    for (const evil of ['a&b', 'a|b', 'a<b', 'a>b', 'a^b', 'a%b', 'a!b', 'a"b']) {
+  it('win32 shell path: legal metachar-bearing PATHS work — quoted, not refused', () => {
+    // Stack review P1: refusing % ! & rejected real Windows profile dirs
+    // (C:\\Users\\R&D, C:\\Users\\100% Ron). Quoting handles them.
+    const plan = buildClaudeSpawnPlan(
+      'C:\\Users\\R&D\\npm\\claude.cmd',
+      ['plugin', 'marketplace', 'add', 'C:\\Users\\100% Ron\\.mysecond\\marketplace', '--scope', 'user'],
+      'win32',
+    );
+    expect(plan.command).toBe('"C:\\Users\\R&D\\npm\\claude.cmd"');
+    expect(plan.args[3]).toBe('"C:\\Users\\100% Ron\\.mysecond\\marketplace"');
+  });
+
+  it('win32 shell path REFUSES the unquotables — double quote and CR/LF (injection primitives; NTFS forbids " in paths)', () => {
+    for (const evil of ['a"b', 'a\rb', 'a\nb']) {
       expect(() =>
         buildClaudeSpawnPlan('C:\\npm\\claude.cmd', ['plugin', 'install', evil], 'win32'),
-      ).toThrow(/metacharacter/);
+      ).toThrow(/unquotable/);
     }
+    expect(() =>
+      buildClaudeSpawnPlan('C:\\np"m\\claude.cmd', ['plugin', 'install', 'x'], 'win32'),
+    ).toThrow(/unquotable/);
   });
 
-  it('POSIX never rejects those same strings (no shell involved — args go straight to execve)', () => {
-    expect(() =>
-      buildClaudeSpawnPlan('/usr/bin/claude', ['plugin', 'install', 'a&b'], 'linux'),
-    ).not.toThrow();
+  it('win32 shell path: an empty arg becomes "" instead of vanishing from the cmd line', () => {
+    const plan = buildClaudeSpawnPlan('C:\\npm\\claude.cmd', ['plugin', ''], 'win32');
+    expect(plan.args).toEqual(['plugin', '""']);
+  });
+
+  it('POSIX never rejects or quotes anything (no shell involved — args go straight to execve)', () => {
+    for (const arg of ['a&b', 'a"b', 'a\nb']) {
+      const plan = buildClaudeSpawnPlan('/usr/bin/claude', ['plugin', 'install', arg], 'linux');
+      expect(plan.args[2]).toBe(arg);
+      expect(plan.shell).toBe(false);
+    }
   });
 });

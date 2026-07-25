@@ -25,7 +25,9 @@ jobs:
     # as test-harness-only vs REAL win32 product bug before this flag comes
     # off. ubuntu + macos remain blocking. Do NOT ship the Windows paste
     # variant default-on while this is true.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # windows-latest advisory mode REMOVED (win32 stack, 2026-07-25): the
+    # suite is green on all three OSes with real .cmd spawn coverage — a red
+    # windows job now blocks like any other.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
