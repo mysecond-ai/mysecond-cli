@@ -338,10 +338,12 @@ describe('pruneStalePlugins', () => {
     expect(result.failed).toEqual([]);
 
     const calls = readClaudeCalls();
-    expect(calls).toHaveLength(EXPERIMENT_PLUGINS.length);
-    for (const p of EXPERIMENT_PLUGINS) {
-      expect(calls).toContain(`plugin uninstall ${p}@${mkt} --scope user`);
-    }
+    // Sorted full-array equality (not per-item toContain): stronger — no
+    // extra call can hide — and on failure vitest prints the COMPLETE diff,
+    // which the truncated toContain message did not (win32 PR-4 debugging).
+    expect([...calls].sort()).toEqual(
+      [...EXPERIMENT_PLUGINS].sort().map((p) => `plugin uninstall ${p}@${mkt} --scope user`),
+    );
     // pm-os must never be uninstalled.
     expect(calls.some((c) => c.includes('pm-os@'))).toBe(false);
   });
