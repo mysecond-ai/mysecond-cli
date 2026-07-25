@@ -157,7 +157,13 @@ exit 0
 function readClaudeCalls(): string[] {
   const logPath = join(root, 'claude-calls.log');
   if (!existsSync(logPath)) return [];
-  return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  // Split on \r?\n and trim each line — the win32 .cmd fixture writes CRLF,
+  // and a stray \r inside the compared strings was the one remaining win32
+  // failure (invisible in the truncated assertion output).
+  return readFileSync(logPath, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 describe('EXPERIMENT_PLUGINS allowlist', () => {
