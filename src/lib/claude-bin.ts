@@ -22,6 +22,8 @@
 // we fire the `onExecpathStale` canary (early warning of a CC release moving the
 // binary) and fall through.
 
+import { spawnSync } from 'node:child_process';
+import type { SpawnSyncOptions } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -141,6 +143,67 @@ export function resolveClaudeBin(opts: ResolveClaudeBinOpts = {}): ResolvedClaud
 
   cache = { path: 'claude', source: 'fallback' };
   return cache;
+}
+
+
+// ── Spawning the claude binary (win32 triage group G, 2026-07) ──────────────
+//
+// Node >=18.20/20.12 (CVE-2024-27980 mitigation) throws EINVAL when
+// spawnSync targets a .cmd/.bat without shell:true — and npm-shim Windows
+// installs resolve `claude.cmd`. Before this helper, EVERY plugin
+// register/install/uninstall spawn failed on such machines: step-9 could
+// strand the install, and the prune path swallowed the EINVAL silently.
+//
+// With shell:true Node performs NO quoting on Windows — the command line is
+// joined and handed to cmd.exe. Two defenses:
+//   1. Args are quoted here when they contain spaces (marketplace dirs live
+//      under paths like C:\Users\Ron Yang\...).
+//   2. Args containing cmd metacharacters are REJECTED outright. Every legit
+//      caller passes only validated slugs, allowlisted plugin tokens,
+//      literal flags, and local paths — a metachar arg is a bug or an
+//      injection attempt, never valid input.
+//
+// buildClaudeSpawnPlan is pure (platform injectable) so the win32 branch is
+// unit-testable from any OS; spawnClaude is the thin executor every
+// call site uses.
+
+const CMD_METACHAR_RE = /[&|<>^%!"]/;
+
+export interface ClaudeSpawnPlan {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+export function buildClaudeSpawnPlan(
+  claudeBin: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+): ClaudeSpawnPlan {
+  const needsShell = platform === 'win32' && /\.(cmd|bat)$/i.test(claudeBin);
+  if (!needsShell) {
+    return { command: claudeBin, args, shell: false };
+  }
+  for (const a of args) {
+    if (CMD_METACHAR_RE.test(a)) {
+      throw new Error(`refusing to shell-spawn claude with metacharacter arg: ${a}`);
+    }
+  }
+  const quote = (v: string): string => (/[\s]/.test(v) ? `"${v}"` : v);
+  return {
+    command: quote(claudeBin),
+    args: args.map(quote),
+    shell: true,
+  };
+}
+
+export function spawnClaude(
+  claudeBin: string,
+  args: string[],
+  opts: SpawnSyncOptions,
+): ReturnType<typeof spawnSync> {
+  const plan = buildClaudeSpawnPlan(claudeBin, args);
+  return spawnSync(plan.command, plan.args, { ...opts, shell: plan.shell });
 }
 
 export const __testing = {

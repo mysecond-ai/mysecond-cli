@@ -72,8 +72,21 @@ function writeLedger(keys: string[]): void {
 
 // Create a fake `claude` binary that logs argv to <root>/claude-calls.log and
 // exits with `exitCode`. Returns its absolute path for the `claudeBin` option.
+// Cross-platform (win32 PR 4): on Windows this writes a .cmd batch file —
+// which also exercises spawnClaude's shell:true path for real, since a bare
+// spawnSync of a .cmd throws EINVAL on Node >=20.12.
+const IS_WIN = process.platform === 'win32';
+
 function makeFakeClaude(exitCode = 0): string {
   const logPath = join(root, 'claude-calls.log');
+  if (IS_WIN) {
+    const binPath = join(root, 'fake-claude.cmd');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nexit /b ${exitCode}\r\n`,
+    );
+    return binPath;
+  }
   const binPath = join(root, 'fake-claude.sh');
   writeFileSync(
     binPath,
@@ -85,8 +98,18 @@ function makeFakeClaude(exitCode = 0): string {
 
 // Create a fake `claude` that logs its call then sleeps far longer than the
 // 30s spawnSync timeout — used to exercise the P2-6 timeout path.
+// win32 delay: `ping -n N+1 127.0.0.1` waits ~N seconds (the batch-file
+// idiom; `timeout.exe` refuses to run without a console on CI).
 function makeHangingClaude(sleepSeconds: number): string {
   const logPath = join(root, 'claude-calls.log');
+  if (IS_WIN) {
+    const binPath = join(root, 'hanging-claude.cmd');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nping -n ${sleepSeconds + 1} 127.0.0.1 >nul\r\n`,
+    );
+    return binPath;
+  }
   const binPath = join(root, 'hanging-claude.sh');
   writeFileSync(
     binPath,
@@ -102,15 +125,27 @@ function makeHangingClaude(sleepSeconds: number): string {
 // lock treats an already-pruned ledger as a clean no-op on a subsequent call.
 function makeLedgerClearingClaude(): string {
   const logPath = join(root, 'claude-calls.log');
-  const binPath = join(root, 'ledger-clearing-claude.sh');
   const ledgerPath = installedPluginsJsonPath();
+  const cleanLedger = '{ "version": 2, "plugins": { "pm-os@mysecond-customer-t0504b-to57": [ { "scope": "user", "version": "1.0.0" } ] } }';
+  if (IS_WIN) {
+    const binPath = join(root, 'ledger-clearing-claude.cmd');
+    // Batch: log argv, then overwrite the ledger via a helper node one-liner
+    // (batch echo would mangle the JSON quoting).
+    const jsonB64 = Buffer.from(cleanLedger).toString('base64');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nnode -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64').toString())" "${ledgerPath}" ${jsonB64}\r\nexit /b 0\r\n`,
+    );
+    return binPath;
+  }
+  const binPath = join(root, 'ledger-clearing-claude.sh');
   // POSIX sh: log argv, then overwrite the ledger with a pm-os-only ledger.
   writeFileSync(
     binPath,
     `#!/bin/sh
 echo "$@" >> "${logPath}"
 cat > "${ledgerPath}" <<'JSON'
-{ "version": 2, "plugins": { "pm-os@mysecond-customer-t0504b-to57": [ { "scope": "user", "version": "1.0.0" } ] } }
+${cleanLedger}
 JSON
 exit 0
 `,
@@ -265,8 +300,7 @@ describe('planStalePluginPrune', () => {
 });
 
 describe('pruneStalePlugins', () => {
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('is a no-op when there are no stale plugins', async () => {
+  it('is a no-op when there are no stale plugins', async () => {
     writeLedger(['pm-os@mysecond-customer-t0511a-qomg']);
     const fakeClaude = makeFakeClaude(0);
     const result = await pruneStalePlugins('t0511a-qomg', {
@@ -278,8 +312,7 @@ describe('pruneStalePlugins', () => {
     expect(readClaudeCalls()).toEqual([]); // never shelled out
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('is a no-op for an invalid slug (P0-2 — sync path passes unvalidated slugs)', async () => {
+  it('is a no-op for an invalid slug (P0-2 — sync path passes unvalidated slugs)', async () => {
     writeLedger(['pm-data@mysecond-customer-../../etc']);
     const fakeClaude = makeFakeClaude(0);
     const result = await pruneStalePlugins('../../etc', {
@@ -290,8 +323,7 @@ describe('pruneStalePlugins', () => {
     expect(readClaudeCalls()).toEqual([]);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('uninstalls every stale plugin via `claude plugin uninstall`', async () => {
+  it('uninstalls every stale plugin via `claude plugin uninstall`', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([
@@ -314,8 +346,7 @@ describe('pruneStalePlugins', () => {
     expect(calls.some((c) => c.includes('pm-os@'))).toBe(false);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('does NOT uninstall a non-allowlist plugin under the marketplace (P0-3)', async () => {
+  it('does NOT uninstall a non-allowlist plugin under the marketplace (P0-3)', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([
@@ -332,8 +363,7 @@ describe('pruneStalePlugins', () => {
     expect(calls.some((c) => c.includes('pm-future-beta'))).toBe(false);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('records plugins as failed when `claude plugin uninstall` exits non-zero', async () => {
+  it('records plugins as failed when `claude plugin uninstall` exits non-zero', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
@@ -345,8 +375,7 @@ describe('pruneStalePlugins', () => {
     expect(result.failed.sort()).toEqual(['pm-data', 'pm-strategy']);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('cleans up the cache dir ONLY after a successful uninstall (P1-4)', async () => {
+  it('cleans up the cache dir ONLY after a successful uninstall (P1-4)', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-os@${mkt}`]);
@@ -361,8 +390,7 @@ describe('pruneStalePlugins', () => {
     expect(existsSync(cacheDir)).toBe(false);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('does NOT delete the cache dir when uninstall FAILS (P1-4)', async () => {
+  it('does NOT delete the cache dir when uninstall FAILS (P1-4)', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-os@${mkt}`]);
@@ -379,8 +407,7 @@ describe('pruneStalePlugins', () => {
     expect(existsSync(cacheDir)).toBe(true);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('does not throw when the fake binary is missing (ENOENT)', async () => {
+  it('does not throw when the fake binary is missing (ENOENT)', async () => {
     const slug = 't0504b-to57';
     writeLedger([`pm-data@mysecond-customer-${slug}`, `pm-os@mysecond-customer-${slug}`]);
     // Point at a nonexistent binary — spawnSync returns status null + error.
@@ -392,8 +419,7 @@ describe('pruneStalePlugins', () => {
     expect(result.removed).toEqual([]);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('treats a hung uninstall as a non-fatal failure (P2-6 — timeout)', async () => {
+  it('treats a hung uninstall as a non-fatal failure (P2-6 — timeout)', async () => {
     // The fake `claude` sleeps 35s — longer than the 30s spawnSync timeout in
     // pruneStalePlugins. spawnSync kills it with SIGTERM; the plugin is
     // recorded as `failed`, not `removed`, and the function returns cleanly.
@@ -422,8 +448,7 @@ describe('pruneStalePlugins — concurrency (P1-5)', () => {
     return join(home, '.claude', 'plugins');
   }
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('backs off cleanly (no shell-out) when the plugin-dir lock is already held', async () => {
+  it('backs off cleanly (no shell-out) when the plugin-dir lock is already held', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
@@ -455,8 +480,7 @@ describe('pruneStalePlugins — concurrency (P1-5)', () => {
     expect(after.removed.sort()).toEqual(['pm-data', 'pm-strategy']);
   });
 
-  // TODO(win32 PR 4): un-skip with the .cmd fake-claude fixture when the shell:true spawn hardening lands
-  it.skipIf(process.platform === 'win32')('the plan re-read inside the lock treats an already-pruned ledger as a clean no-op', async () => {
+  it('the plan re-read inside the lock treats an already-pruned ledger as a clean no-op', async () => {
     const slug = 't0504b-to57';
     const mkt = `mysecond-customer-${slug}`;
     writeLedger([`pm-data@${mkt}`, `pm-strategy@${mkt}`, `pm-os@${mkt}`]);
