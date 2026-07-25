@@ -56,7 +56,7 @@
 // successful uninstall — never on the failure path (a deleted cache dir behind
 // a still-registered ledger entry breaks Claude startup).
 
-import { spawnSync } from 'node:child_process';
+import { spawnClaude } from './claude-bin.js';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -332,7 +332,7 @@ export async function pruneStalePlugins(
       }
 
       const spec = `${pluginName}@${lockedPlan.marketplace}`;
-      const result = spawnSync(
+      const result = spawnClaude(
         claudeBin,
         ['plugin', 'uninstall', spec, '--scope', 'user'],
         { stdio: 'pipe', timeout: UNINSTALL_TIMEOUT_MS },

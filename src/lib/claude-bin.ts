@@ -22,6 +22,8 @@
 // we fire the `onExecpathStale` canary (early warning of a CC release moving the
 // binary) and fall through.
 
+import { spawnSync } from 'node:child_process';
+import type { SpawnSyncOptions } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -141,6 +143,84 @@ export function resolveClaudeBin(opts: ResolveClaudeBinOpts = {}): ResolvedClaud
 
   cache = { path: 'claude', source: 'fallback' };
   return cache;
+}
+
+
+// ── Spawning the claude binary (win32 triage group G, 2026-07) ──────────────
+//
+// Node >=18.20/20.12 (CVE-2024-27980 mitigation) throws EINVAL when
+// spawnSync targets a .cmd/.bat without shell:true — and npm-shim Windows
+// installs resolve `claude.cmd`. Before this helper, EVERY plugin
+// register/install/uninstall spawn failed on such machines: step-9 could
+// strand the install, and the prune path swallowed the EINVAL silently.
+//
+// With shell:true Node performs NO quoting on Windows — the command line is
+// joined and handed to cmd.exe. Two defenses:
+//   1. Args are quoted here when they contain spaces (marketplace dirs live
+//      under paths like C:\Users\Ron Yang\...).
+//   2. Args containing cmd metacharacters are REJECTED outright. Every legit
+//      caller passes only validated slugs, allowlisted plugin tokens,
+//      literal flags, and local paths — a metachar arg is a bug or an
+//      injection attempt, never valid input.
+//
+// buildClaudeSpawnPlan is pure (platform injectable) so the win32 branch is
+// unit-testable from any OS; spawnClaude is the thin executor every
+// call site uses.
+
+// Hard refusal: only the truly unquotable — a double quote breaks our own
+// quoting, and CR/LF are command-separator injection primitives. NTFS
+// forbids `"` in paths, so no legal input is rejected.
+const CMD_UNQUOTABLE_RE = /["\r\n]/;
+// Quote trigger: whitespace or anything cmd.exe treats specially OUTSIDE
+// quotes. Inside double quotes cmd treats & | < > ^ ( ) , ; = literally, so
+// quoting neutralizes them — legal Windows profile dirs like C:\Users\R&D
+// must WORK, not be refused (stack review P1). Residual documented edges,
+// both quoted-through: `%` pairs expand only when they name a DEFINED env
+// var (undefined stays literal on the cmd line); `!` only matters under
+// delayed expansion, which cmd /c does not enable.
+const CMD_QUOTE_TRIGGER_RE = /[\s&|<>^%!(),;=]/;
+
+export interface ClaudeSpawnPlan {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+export function buildClaudeSpawnPlan(
+  claudeBin: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+): ClaudeSpawnPlan {
+  const needsShell = platform === 'win32' && /\.(cmd|bat)$/i.test(claudeBin);
+  if (!needsShell) {
+    return { command: claudeBin, args, shell: false };
+  }
+  for (const token of [claudeBin, ...args]) {
+    if (CMD_UNQUOTABLE_RE.test(token)) {
+      throw new Error(`refusing to shell-spawn claude with unquotable token: ${JSON.stringify(token)}`);
+    }
+  }
+  // The COMMAND is always quoted (stack review P1: an unquoted
+  // C:\Users\R&D\...\claude.cmd splits at `&`). Args are quoted when they
+  // carry whitespace or metachars — clean slugs/flags stay bare, which also
+  // keeps batch %* logging byte-stable for the fixtures. An empty arg
+  // becomes "" instead of silently vanishing from the cmd line.
+  const quoteArg = (v: string): string =>
+    v === '' || CMD_QUOTE_TRIGGER_RE.test(v) ? `"${v}"` : v;
+  return {
+    command: `"${claudeBin}"`,
+    args: args.map(quoteArg),
+    shell: true,
+  };
+}
+
+export function spawnClaude(
+  claudeBin: string,
+  args: string[],
+  opts: SpawnSyncOptions,
+): ReturnType<typeof spawnSync> {
+  const plan = buildClaudeSpawnPlan(claudeBin, args);
+  return spawnSync(plan.command, plan.args, { ...opts, shell: plan.shell });
 }
 
 export const __testing = {

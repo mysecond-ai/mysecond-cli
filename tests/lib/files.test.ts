@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { describe, it, expect } from 'vitest';
 
@@ -30,10 +30,13 @@ describe('sha256 / shortHash', () => {
 });
 
 describe('safePath', () => {
-  const base = '/Users/test/project';
+  // resolve() so the base carries a drive letter on win32 — safePath returns
+  // resolve(baseDir, rel) in NATIVE separators, so a '/'-literal template
+  // string would mismatch. join() keeps expectations separator-agnostic.
+  const base = resolve('/Users/test/project');
 
   it('accepts a normal relative path', () => {
-    expect(safePath(base, 'context/company.md')).toBe(`${base}/context/company.md`);
+    expect(safePath(base, 'context/company.md')).toBe(join(base, 'context', 'company.md'));
   });
 
   it('rejects absolute paths', () => {
@@ -46,7 +49,7 @@ describe('safePath', () => {
   });
 
   it('handles dot-prefix files safely', () => {
-    expect(safePath(base, '.env')).toBe(`${base}/.env`);
+    expect(safePath(base, '.env')).toBe(join(base, '.env'));
   });
 });
 
@@ -77,14 +80,17 @@ describe('writeLocalFile / readLocalFile / deleteLocalFile', () => {
 
 describe('projectPaths', () => {
   it('builds expected layout', () => {
-    const p = projectPaths('/proj');
-    expect(p.contextDir).toBe('/proj/context');
-    expect(p.skillsDir).toBe('/proj/.claude/skills');
-    expect(p.agentsDir).toBe('/proj/.claude/agents');
-    expect(p.workflowsDir).toBe('/proj/workflows');
-    expect(p.claudeMdPath).toBe('/proj/CLAUDE.md');
-    expect(p.syncStatePath).toBe('/proj/.claude/sync-state.json');
-    expect(p.conflictsDir).toBe('/proj/.claude/sync-conflicts');
+    // projectPaths joins in NATIVE separators; build expectations with join()
+    // so the layout assertion holds on win32 too.
+    const root = resolve('/proj');
+    const p = projectPaths(root);
+    expect(p.contextDir).toBe(join(root, 'context'));
+    expect(p.skillsDir).toBe(join(root, '.claude', 'skills'));
+    expect(p.agentsDir).toBe(join(root, '.claude', 'agents'));
+    expect(p.workflowsDir).toBe(join(root, 'workflows'));
+    expect(p.claudeMdPath).toBe(join(root, 'CLAUDE.md'));
+    expect(p.syncStatePath).toBe(join(root, '.claude', 'sync-state.json'));
+    expect(p.conflictsDir).toBe(join(root, '.claude', 'sync-conflicts'));
   });
 });
 

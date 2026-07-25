@@ -37,6 +37,7 @@ import { join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
 import {
   planStalePluginPrune,
   pruneStalePlugins,
@@ -46,19 +47,19 @@ import {
 
 let root: string;
 let home: string;
-let originalHome: string | undefined;
+let fakeHome: FakeHome;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'mysecond-prune-'));
   home = join(root, 'home');
+  // Sets BOTH HOME and USERPROFILE — os.homedir() reads USERPROFILE on win32,
+  // so a HOME-only override sandboxes nothing there.
+  fakeHome = installFakeHome(undefined, home);
   mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
-  originalHome = process.env.HOME;
-  process.env.HOME = home;
 });
 
 afterEach(() => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  fakeHome.restore();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -71,8 +72,21 @@ function writeLedger(keys: string[]): void {
 
 // Create a fake `claude` binary that logs argv to <root>/claude-calls.log and
 // exits with `exitCode`. Returns its absolute path for the `claudeBin` option.
+// Cross-platform (win32 PR 4): on Windows this writes a .cmd batch file —
+// which also exercises spawnClaude's shell:true path for real, since a bare
+// spawnSync of a .cmd throws EINVAL on Node >=20.12.
+const IS_WIN = process.platform === 'win32';
+
 function makeFakeClaude(exitCode = 0): string {
   const logPath = join(root, 'claude-calls.log');
+  if (IS_WIN) {
+    const binPath = join(root, 'fake-claude.cmd');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nexit /b ${exitCode}\r\n`,
+    );
+    return binPath;
+  }
   const binPath = join(root, 'fake-claude.sh');
   writeFileSync(
     binPath,
@@ -84,8 +98,18 @@ function makeFakeClaude(exitCode = 0): string {
 
 // Create a fake `claude` that logs its call then sleeps far longer than the
 // 30s spawnSync timeout — used to exercise the P2-6 timeout path.
+// win32 delay: `ping -n N+1 127.0.0.1` waits ~N seconds (the batch-file
+// idiom; `timeout.exe` refuses to run without a console on CI).
 function makeHangingClaude(sleepSeconds: number): string {
   const logPath = join(root, 'claude-calls.log');
+  if (IS_WIN) {
+    const binPath = join(root, 'hanging-claude.cmd');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nping -n ${sleepSeconds + 1} 127.0.0.1 >nul\r\n`,
+    );
+    return binPath;
+  }
   const binPath = join(root, 'hanging-claude.sh');
   writeFileSync(
     binPath,
@@ -101,15 +125,27 @@ function makeHangingClaude(sleepSeconds: number): string {
 // lock treats an already-pruned ledger as a clean no-op on a subsequent call.
 function makeLedgerClearingClaude(): string {
   const logPath = join(root, 'claude-calls.log');
-  const binPath = join(root, 'ledger-clearing-claude.sh');
   const ledgerPath = installedPluginsJsonPath();
+  const cleanLedger = '{ "version": 2, "plugins": { "pm-os@mysecond-customer-t0504b-to57": [ { "scope": "user", "version": "1.0.0" } ] } }';
+  if (IS_WIN) {
+    const binPath = join(root, 'ledger-clearing-claude.cmd');
+    // Batch: log argv, then overwrite the ledger via a helper node one-liner
+    // (batch echo would mangle the JSON quoting).
+    const jsonB64 = Buffer.from(cleanLedger).toString('base64');
+    writeFileSync(
+      binPath,
+      `@echo off\r\necho %*>> "${logPath}"\r\nnode -e "require('fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64').toString())" "${ledgerPath}" ${jsonB64}\r\nexit /b 0\r\n`,
+    );
+    return binPath;
+  }
+  const binPath = join(root, 'ledger-clearing-claude.sh');
   // POSIX sh: log argv, then overwrite the ledger with a pm-os-only ledger.
   writeFileSync(
     binPath,
     `#!/bin/sh
 echo "$@" >> "${logPath}"
 cat > "${ledgerPath}" <<'JSON'
-{ "version": 2, "plugins": { "pm-os@mysecond-customer-t0504b-to57": [ { "scope": "user", "version": "1.0.0" } ] } }
+${cleanLedger}
 JSON
 exit 0
 `,
@@ -121,7 +157,13 @@ exit 0
 function readClaudeCalls(): string[] {
   const logPath = join(root, 'claude-calls.log');
   if (!existsSync(logPath)) return [];
-  return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  // Split on \r?\n and trim each line — the win32 .cmd fixture writes CRLF,
+  // and a stray \r inside the compared strings was the one remaining win32
+  // failure (invisible in the truncated assertion output).
+  return readFileSync(logPath, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 describe('EXPERIMENT_PLUGINS allowlist', () => {
@@ -302,10 +344,12 @@ describe('pruneStalePlugins', () => {
     expect(result.failed).toEqual([]);
 
     const calls = readClaudeCalls();
-    expect(calls).toHaveLength(EXPERIMENT_PLUGINS.length);
-    for (const p of EXPERIMENT_PLUGINS) {
-      expect(calls).toContain(`plugin uninstall ${p}@${mkt} --scope user`);
-    }
+    // Sorted full-array equality (not per-item toContain): stronger — no
+    // extra call can hide — and on failure vitest prints the COMPLETE diff,
+    // which the truncated toContain message did not (win32 PR-4 debugging).
+    expect([...calls].sort()).toEqual(
+      [...EXPERIMENT_PLUGINS].sort().map((p) => `plugin uninstall ${p}@${mkt} --scope user`),
+    );
     // pm-os must never be uninstalled.
     expect(calls.some((c) => c.includes('pm-os@'))).toBe(false);
   });

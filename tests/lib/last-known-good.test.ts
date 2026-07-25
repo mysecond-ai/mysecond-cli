@@ -1,27 +1,30 @@
-// Tests for last-known-good cache behavior. We override HOME to a tmpdir so
-// tests don't pollute the real ~/.mysecond.
+// Tests for last-known-good cache behavior. We sandbox the home dir to a
+// tmpdir so tests don't pollute the real ~/.mysecond. installFakeHome sets
+// BOTH HOME and USERPROFILE — os.homedir() reads USERPROFILE on win32, so a
+// HOME-only override sandboxes nothing there.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
+
+let fake: FakeHome;
 let fakeHome: string;
-let originalHome: string | undefined;
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(join(tmpdir(), 'mysecond-lkg-'));
-  originalHome = process.env.HOME;
-  process.env.HOME = fakeHome;
+  fake = installFakeHome('mysecond-lkg-');
+  fakeHome = fake.home;
   // Force a fresh import of mysecond-paths + last-known-good so they pick up the
-  // overridden HOME. Vitest caches module evaluations, so we reset between tests.
+  // overridden home. Vitest caches module evaluations, so we reset between tests.
   vi.resetModules();
 });
 
 afterEach(() => {
-  if (originalHome !== undefined) process.env.HOME = originalHome;
-  rmSync(fakeHome, { recursive: true, force: true });
+  fake.restore();
+  // fake.home lives inside a mkdtemp parent — remove the whole temp tree.
+  rmSync(dirname(fakeHome), { recursive: true, force: true });
 });
 
 async function loadModule(): Promise<typeof import('../../src/lib/last-known-good.js')> {

@@ -41,7 +41,9 @@ const STEP15_PATH = join(
 );
 
 describe('v1.4.3 — re-auth on revoked token (step 15 always runs)', () => {
-  const source = readFileSync(RUNNER_PATH, 'utf8');
+  // Normalize CRLF: Windows git checkout may convert LF→CRLF, which breaks
+  // multi-line / newline-sensitive source-text assertions below.
+  const source = readFileSync(RUNNER_PATH, 'utf8').replace(/\r\n/g, '\n');
 
   it('declares an alwaysRunStep15 gate that bypasses ledger-skip', () => {
     // The runner must compute alwaysRunStep15 from the entry number and
@@ -70,7 +72,9 @@ describe('v1.4.3 — re-auth on revoked token (step 15 always runs)', () => {
 });
 
 describe('v1.4.3 — default flow picks up pending-auth state', () => {
-  const source = readFileSync(STEP15_PATH, 'utf8');
+  // Normalize CRLF: Windows git checkout may convert LF→CRLF, which breaks
+  // the LF-delimited needle in the fallthrough assertion below.
+  const source = readFileSync(STEP15_PATH, 'utf8').replace(/\r\n/g, '\n');
 
   it('default flow checks readPendingAuth before runDeviceCodeFlow', () => {
     // Plain `mysecond init` (no --resume, no --auth-only) must pick up an
