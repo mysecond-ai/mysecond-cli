@@ -7,7 +7,27 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 3-OS matrix (install-wall plan, 2026-07-24):
+    #   - windows-latest: zero device codes have EVER been minted from win32 —
+    #     the CLI had never run on Windows in CI. This is the Windows
+    #     correctness gate that doesn't depend on anyone owning a Windows
+    #     machine.
+    #   - macos-latest: the REAL `security` keychain shell-out path had never
+    #     run in CI either — ubuntu always exercised the file fallback.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # windows-latest is ADVISORY for now (first-ever win32 run surfaced ~60
+    # pre-existing POSIX assumptions across ~16 test files — 2026-07-24, PR
+    # #50 run). Tracked as its own workstream: each failure must be triaged
+    # as test-harness-only vs REAL win32 product bug before this flag comes
+    # off. ubuntu + macos remain blocking. Do NOT ship the Windows paste
+    # variant default-on while this is true.
+    # windows-latest advisory mode REMOVED (win32 stack, 2026-07-25): the
+    # suite is green on all three OSes with real .cmd spawn coverage — a red
+    # windows job now blocks like any other.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,3 +38,13 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      # Standalone (fallback) artifact must at least self-execute with no
+      # node_modules present — the bare-Docker Layer-2 script is the full
+      # gate; this catches "bundled but crashes on load" on every OS.
+      - name: standalone smoke (no node_modules)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/standalone-smoke"
+          cp dist-standalone/mysecond-standalone.mjs "$RUNNER_TEMP/standalone-smoke/"
+          cd "$RUNNER_TEMP/standalone-smoke"
+          node mysecond-standalone.mjs --help > /dev/null

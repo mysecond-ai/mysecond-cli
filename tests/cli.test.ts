@@ -40,6 +40,24 @@ function runBin(args: readonly string[], opts: RunBinOptions = {}): ExecResult {
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) baseEnv[k] = v;
   }
+  // Hermetic-by-default (install-wall review, 2026-07-24): these tests spawn
+  // the REAL built binary while inheriting the parent env. Two live-fire
+  // hazards found:
+  //   1. Inside a Claude Code session, CLAUDECODE=1 leaks in — the
+  //      "wrong-window" test then PASSES the gate, runs real init, mints a
+  //      REAL device code against production, and polls it for 540s (the
+  //      mysterious ~9-min runtime of this file, and some of prod's orphan
+  //      device_codes rows).
+  //   2. The new install beacons would POST wrong_window/cli_started to
+  //      production from every test run.
+  // Point the binary at an unroutable loopback port (instant ECONNREFUSED —
+  // network paths fail FAST and deterministically) and kill the beacon.
+  // Individual tests can still override either knob.
+  baseEnv.COMPANION_API_URL = 'http://127.0.0.1:9';
+  baseEnv.MYSECOND_NO_BEACON = '1';
+  delete baseEnv.CLAUDECODE;
+  delete baseEnv.CLAUDE_CODE_ENTRYPOINT;
+  delete baseEnv.CLAUDE_CODE_ACCOUNT_UUID;
   if (opts.envOverride) {
     for (const [k, v] of Object.entries(opts.envOverride)) {
       if (v === undefined) {

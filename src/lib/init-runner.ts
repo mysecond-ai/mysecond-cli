@@ -5,8 +5,10 @@ import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { emitTelemetry } from './api.js';
+import { emitBeacon } from './beacon.js';
 import { SIGINT_MESSAGE } from './copy.js';
 import type { CommandContext } from './context.js';
+import { getInstallIdWriteError, getOrCreateInstallId } from './device-code.js';
 import { MysecondError } from './errors.js';
 import { isInClaudeCodeContext, WRONG_WINDOW_COPY } from './paste-detect.js';
 import { marketplacesRoot } from './mysecond-paths.js';
@@ -21,11 +23,24 @@ import { runGitignoreGuard } from './steps/step-5b.js';
 import type { StepContext } from './steps/types.js';
 
 export async function runInit(ctx: CommandContext): Promise<number> {
-  // Wrong-window detection FIRST (§6.9). Before any state mutation, before any
-  // network call. Customer pasted into a regular terminal instead of Claude
+  // Wrong-window detection FIRST (§6.9). Before any INSTALL state mutation.
+  // (Honest scope note, review round 2: this path DOES now write the
+  // machine-scoped ~/.mysecond/install-id — the same file any run creates —
+  // and makes the one beacon call below. Project/workspace state is
+  // untouched.) Customer pasted into a regular terminal instead of Claude
   // Code's terminal — exit 2 with actionable copy.
+  //
+  // Install-wall: this exit was previously INVISIBLE server-side — the run
+  // ends before any authenticated call. Beacon it, and AWAIT (bounded 3s,
+  // never rejects): fire-and-forget on an exit path dies with the process.
   if (!isInClaudeCodeContext(ctx.rootDir)) {
     process.stderr.write(WRONG_WINDOW_COPY + '\n');
+    await emitBeacon({
+      apiBase: ctx.apiBase,
+      installId: getOrCreateInstallId(),
+      stage: 'wrong_window',
+      slug: process.env.MYSECOND_CUSTOMER_SLUG,
+    });
     return 2;
   }
 
@@ -46,6 +61,53 @@ export async function runInit(ctx: CommandContext): Promise<number> {
       slug: telemetrySlug,
       resuming: state.initCompletedSteps !== undefined && state.initCompletedSteps.length > 0,
     });
+  }
+
+  // Install-wall: cli_started fires in EVERY mode, --auth-only included.
+  // The authed install.started above is guarded off in --auth-only (funnel
+  // ratio reasons) AND rides an endpoint that requires a Bearer token which
+  // doesn't exist pre-auth — which made the two-command paste flow's Step 1
+  // invisible. The unauthed beacon has neither constraint.
+  //
+  // Delivery (review round 2 P2, empirically reproduced): a bare `void` here
+  // silently LOST the beacon on fast-exit runs — the --auth-only REUSE path
+  // (unexpired pending code, zero network work) exits in milliseconds, so
+  // every double-paste / agent-retry Step 1 was invisible. The promises are
+  // held and awaited in the finally below: ~0ms added when any network step
+  // ran (long settled), ≤3s worst-case on fast exits — the price of the
+  // measurement actually existing.
+  //
+  // --dry-run is excluded: synthetic runs must not pollute the funnel
+  // denominator dashboards are built on.
+  const installId = getOrCreateInstallId();
+  const pendingBeacons: Array<Promise<void>> = [];
+  if (!ctx.dryRun) {
+    pendingBeacons.push(
+      emitBeacon({
+        apiBase: ctx.apiBase,
+        installId,
+        stage: 'cli_started',
+        slug: telemetrySlug === 'unknown' ? undefined : telemetrySlug,
+      })
+    );
+  }
+
+  // EACCES/EPERM writing ~/.mysecond is the fingerprint of Claude Code's
+  // sandbox filesystem isolation (or a locked-down MDM home dir) — the same
+  // restriction that will break the marketplace install at step 9. Beacon it
+  // now so the enterprise-sandbox cohort becomes measurable (install-wall
+  // plan; today they are indistinguishable from "never tried").
+  const idWriteErr = getInstallIdWriteError();
+  if (!ctx.dryRun && idWriteErr && (idWriteErr.code === 'EACCES' || idWriteErr.code === 'EPERM')) {
+    pendingBeacons.push(
+      emitBeacon({
+        apiBase: ctx.apiBase,
+        installId,
+        stage: 'sandbox_suspected',
+        slug: telemetrySlug === 'unknown' ? undefined : telemetrySlug,
+        errorClass: idWriteErr.code,
+      })
+    );
   }
 
   // Stale-tmp cleanup on resume (CTO-2 + RT-1 lock-scoped — §6.2).
@@ -222,6 +284,11 @@ export async function runInit(ctx: CommandContext): Promise<number> {
     return 0;
   } finally {
     process.off('SIGINT', onSigint);
+    // Drain held beacons before runInit resolves — src/index.ts calls
+    // process.exit() the moment we return, which kills in-flight requests.
+    // Each promise never rejects and self-bounds at 3s; on any run that did
+    // network work they are long settled and this is a no-op await.
+    await Promise.all(pendingBeacons);
   }
 }
 

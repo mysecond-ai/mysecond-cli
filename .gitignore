@@ -10,3 +10,4 @@ coverage/
 # Local verification scratch
 .tmp/
 mysecond-cli-*.tgz
+dist-standalone/

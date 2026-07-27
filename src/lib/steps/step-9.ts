@@ -15,6 +15,7 @@
 // in sync-state across invocations; ≥3 retries → exit 8. Reset to 0 on success.
 
 import { spawnSync } from 'node:child_process';
+import { spawnClaude } from '../claude-bin.js';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -311,7 +312,7 @@ async function doStep9(
   // undefined behavior per docs (no documented re-add-reconciles guarantee).
   // Idempotency pattern: remove first (best-effort, swallow non-zero), then
   // add. Covers both first-install (remove is no-op) and stale-pointer cases.
-  spawnSync(
+  spawnClaude(
     claudeBin,
     ['plugin', 'marketplace', 'remove', marketplaceName(slug), '--scope', 'user'],
     { stdio: 'pipe', timeout: registerTimeout() }
@@ -319,7 +320,7 @@ async function doStep9(
 
   // Sub-step (f): claude plugin marketplace add + claude plugin install.
   // Both verified non-interactive on Ron's Mac 2026-04-22 (DV-1).
-  const addResult = spawnSync(
+  const addResult = spawnClaude(
     claudeBin,
     ['plugin', 'marketplace', 'add', marketplaceDir(slug), '--scope', 'user'],
     { stdio: ctx.silent ? 'pipe' : 'inherit', timeout: registerTimeout() }
@@ -329,7 +330,13 @@ async function doStep9(
   // now rare (it validates candidates), but the fallback path returns bare
   // 'claude', so keep the check. This throw is now DEGRADABLE (caught below):
   // the install continues and context still syncs.
-  if (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT') {
+  // status 9009 = cmd.exe "not recognized" — the shell-path equivalent of
+  // ENOENT (spawnClaude uses cmd /c for .cmd shims; see plugin-register's
+  // isEnoent). Same friendly error either way.
+  if (
+    addResult.status === 9009 ||
+    (addResult.error !== undefined && (addResult.error as NodeJS.ErrnoException).code === 'ENOENT')
+  ) {
     throw new MysecondError(
       6,
       "Couldn't run the Claude Code CLI to register the PM OS plugin (binary not found). Your context still synced — re-open Claude Code (or re-run the install) to finish loading the skills."
@@ -388,7 +395,7 @@ async function doStep9(
     // Fix C Step 1: per-plugin wall-clock measurement. We want to see
     // which plugin(s) are slow before deciding whether to parallelize.
     const pluginStartMs = performance.now();
-    const installResult = spawnSync(
+    const installResult = spawnClaude(
       claudeBin,
       ['plugin', 'install', spec, '--scope', 'user'],
       { stdio: ctx.silent ? 'pipe' : 'inherit', timeout: registerTimeout() }
@@ -623,7 +630,7 @@ function tryFallback(
 
     // Run marketplace add against the rehydrated dir (best-effort — if Claude
     // Code is also down or admin-restricted, this fails and we surface error).
-    const result = spawnSync(
+    const result = spawnClaude(
       claudeBin,
       ['plugin', 'marketplace', 'add', marketplaceTarget, '--scope', 'user'],
       { stdio: 'pipe', timeout: Math.max(1, deadline - Date.now()) }
@@ -634,7 +641,7 @@ function tryFallback(
     // as the main path: `pm-os` MUST install for fallback to count.
     for (const plugin of plugins) {
       if (deadline - Date.now() <= 0) return null; // budget exhausted mid-loop
-      const installResult = spawnSync(
+      const installResult = spawnClaude(
         claudeBin,
         ['plugin', 'install', pluginInstallSpec(slug, plugin.name), '--scope', 'user'],
         { stdio: 'pipe', timeout: Math.max(1, deadline - Date.now()) }

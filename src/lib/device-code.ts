@@ -12,9 +12,9 @@
 //        - 200 → return { access_token, ... }
 //        - 400 already_exchanged | invalid | expired → throw
 //        - 400 authorization_pending → wait + retry
-//        - 540s elapsed → throw TIMEOUT (CAIO #9 — 10% safety under
-//          Anthropic's 600s hook reaper; cli emits its own actionable
-//          message before the reaper kills the process)
+//        - 540s elapsed → throw TIMEOUT (10% safety under Claude Code's max
+//          Bash-tool timeout; see POLL_HARD_CAP_SECONDS for the corrected
+//          rationale — the old "hook reaper" attribution was wrong)
 //
 // Brief: ~/.claude/plans/workstream-b-device-code-brief.md
 
@@ -62,7 +62,16 @@ export class DeviceCodeError extends Error {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-/** CAIO #9: 10% safety margin under Anthropic's 600s PostToolUse hook reaper. */
+/**
+ * 10% safety margin under Claude Code's MAX Bash-tool timeout (600s —
+ * `BASH_MAX_TIMEOUT_MS` default; the paste instructs a 600000 ms timeout for
+ * Step 2). Correction (install-wall review, 2026-07-24): earlier comments
+ * attributed this to a "600s PostToolUse hook reaper" — hook timeouts govern
+ * hook subprocesses, not this Bash-tool command. Also note current Claude
+ * Code AUTO-BACKGROUNDS a command at its timeout rather than killing it; the
+ * cap still matters because it surfaces an actionable error while the agent
+ * is foreground-attached instead of from a background output file.
+ */
 export const POLL_HARD_CAP_SECONDS = 540;
 
 /** Default fetch timeout for individual /code and /token round-trips. */
@@ -81,19 +90,47 @@ export function getOrCreateInstallId(): string {
   if (existsSync(path)) {
     try {
       const raw = readFileSync(path, 'utf8').trim();
-      if (raw.length > 0 && raw.length <= 128) return raw;
+      if (raw.length > 0 && raw.length <= 128) {
+        // Successful read = home IS writable/readable now; clear any error a
+        // prior call recorded so a later beacon can't falsely claim sandbox
+        // (codex P2: stale-error path).
+        lastInstallIdWriteError = null;
+        return raw;
+      }
     } catch {
       // fall through to mint a new one
     }
   }
-  mkdirSync(dir, { recursive: true });
   const id = randomUUID();
   try {
+    // DELIBERATE semantics change vs pre-install-wall (codex noted it):
+    // mkdirSync used to sit OUTSIDE the try, so an unwritable home dir
+    // CRASHED the CLI before minting anything. Now both mkdir and write are
+    // best-effort: a sandboxed machine proceeds with an in-memory id and the
+    // install continues as far as the environment allows. Tradeoff, accepted:
+    // separate processes on such a machine (auth-only, then resume) each mint
+    // a DIFFERENT in-memory id, splitting their PostHog person — measurable
+    // beats crashed.
+    mkdirSync(dir, { recursive: true });
     writeFileSync(path, id + '\n', { mode: 0o600 });
-  } catch {
-    // Best-effort — return the in-memory value either way.
+    lastInstallIdWriteError = null;
+  } catch (err) {
+    // Record the failure: EACCES/EPERM on ~/.mysecond is the fingerprint of
+    // Claude Code's sandbox filesystem isolation (writes allowed only in CWD
+    // + session TMPDIR), which also blocks the marketplace install later.
+    // init-runner beacons `sandbox_suspected` off this (install-wall plan).
+    lastInstallIdWriteError = err as NodeJS.ErrnoException;
   }
   return id;
+}
+
+let lastInstallIdWriteError: NodeJS.ErrnoException | null = null;
+
+/** Non-null when the last getOrCreateInstallId() couldn't persist to
+ *  ~/.mysecond. Callers with a CommandContext use this to beacon
+ *  `sandbox_suspected` (they have apiBase; this module doesn't). */
+export function getInstallIdWriteError(): NodeJS.ErrnoException | null {
+  return lastInstallIdWriteError;
 }
 
 // ── HTTP ───────────────────────────────────────────────────────────────────

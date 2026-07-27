@@ -14,6 +14,7 @@
 // the small spawn-sequencing wrapper is intentionally duplicated.
 
 import { spawnSync } from 'node:child_process';
+import { spawnClaude } from './claude-bin.js';
 
 import {
   marketplaceDir,
@@ -67,6 +68,12 @@ function spawnTimedOut(r: ReturnType<typeof spawnSync>): boolean {
 }
 
 function isEnoent(r: ReturnType<typeof spawnSync>): boolean {
+  // Through the win32 shell path (spawnClaude → cmd /c for .cmd shims) a
+  // vanished binary can never produce error.code='ENOENT' — cmd.exe exits
+  // 9009 ("not recognized") instead. Without this, binary_not_found (and its
+  // friendly "re-open Claude Code, then retry" message) silently degrades to
+  // a generic non-zero failure (stack review P3-1).
+  if (r.status === 9009) return true;
   return (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
@@ -93,7 +100,7 @@ export function registerMarketplaceAndInstall(params: RegisterParams): RegisterR
   // Idempotency: remove any existing registration first (best-effort — a
   // first-time refresh has nothing to remove; a re-run clears a stale pointer).
   if (remaining(deadlineMs) <= 0) return { outcome: { kind: 'timed_out' }, failedPlugins };
-  spawnSync(
+  spawnClaude(
     claudeBin,
     ['plugin', 'marketplace', 'remove', marketplaceName(slug), '--scope', 'user'],
     { stdio: 'pipe', timeout: Math.max(1, remaining(deadlineMs)) }
@@ -101,7 +108,7 @@ export function registerMarketplaceAndInstall(params: RegisterParams): RegisterR
 
   // Add the materialized marketplace dir.
   if (remaining(deadlineMs) <= 0) return { outcome: { kind: 'timed_out' }, failedPlugins };
-  const addResult = spawnSync(
+  const addResult = spawnClaude(
     claudeBin,
     ['plugin', 'marketplace', 'add', marketplaceDir(slug), '--scope', 'user'],
     { stdio, timeout: Math.max(1, remaining(deadlineMs)) }
@@ -122,7 +129,7 @@ export function registerMarketplaceAndInstall(params: RegisterParams): RegisterR
   for (const plugin of plugins) {
     if (remaining(deadlineMs) <= 0) return { outcome: { kind: 'timed_out' }, failedPlugins };
     const spec = pluginInstallSpec(slug, plugin.name);
-    const installResult = spawnSync(
+    const installResult = spawnClaude(
       claudeBin,
       ['plugin', 'install', spec, '--scope', 'user'],
       { stdio, timeout: Math.max(1, remaining(deadlineMs)) }

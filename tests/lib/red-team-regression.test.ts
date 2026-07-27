@@ -1,22 +1,25 @@
 // Regression tests for the 6 red-team findings on PR 4c.
 // Each test ENCODES the bug so a future refactor that removes the fix fails.
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
+
 const CC_ENV_VARS = ['CLAUDECODE', 'CLAUDE_PROJECT_DIR', 'CLAUDE_CODE_ACCOUNT_UUID', 'CLAUDE_CODE_ENTRYPOINT'];
 
+let fake: FakeHome;
 let fakeHome: string;
-let originalHome: string | undefined;
 let savedCcEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(join(tmpdir(), 'mysecond-redteam-'));
-  originalHome = process.env.HOME;
-  process.env.HOME = fakeHome;
+  // installFakeHome sets BOTH HOME and USERPROFILE — os.homedir() reads
+  // USERPROFILE on win32, so setting only HOME sandboxed nothing there and
+  // fixtures (e.g. the 0.9.0 LKG index below) leaked into the real runner home.
+  fake = installFakeHome('mysecond-redteam-');
+  fakeHome = fake.home;
   // Clear ALL Claude Code env signals so filesystem-walk tests aren't
   // short-circuited by ambient CC env (e.g. CLAUDECODE=1 when running
   // inside the CC bash sandbox). Also clears new belt-and-suspenders
@@ -30,12 +33,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (originalHome !== undefined) process.env.HOME = originalHome;
+  fake.restore();
   for (const key of CC_ENV_VARS) {
     if (savedCcEnv[key] !== undefined) process.env[key] = savedCcEnv[key];
     else delete process.env[key];
   }
-  rmSync(fakeHome, { recursive: true, force: true });
+  // fake.home is <mkdtemp>/home — remove the whole mkdtemp parent.
+  rmSync(dirname(fakeHome), { recursive: true, force: true });
 });
 
 // =====================================================================

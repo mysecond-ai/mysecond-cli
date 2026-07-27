@@ -22,6 +22,7 @@ import {
   getDeviceToken,
 } from '../../src/lib/keychain.js';
 import { projectHash } from '../../src/lib/project-hash.js';
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
 
 /**
  * Plant a project-scoped credentials file under an isolated $HOME so
@@ -38,26 +39,26 @@ function plantCredsFile(home: string, projectDir: string, content: string): stri
 }
 
 describe('getDeviceToken — normalizes stored credential format', () => {
-  let savedHome: string | undefined;
+  // installFakeHome sets BOTH HOME and USERPROFILE — os.homedir() reads
+  // USERPROFILE on win32, so a HOME-only sandbox planted fixtures in the
+  // real runner home there.
+  let fake: FakeHome;
 
   beforeEach(() => {
-    savedHome = process.env.HOME;
+    fake = installFakeHome('mysecond-kc-');
     // MYSECOND_NO_KEYCHAIN=1 forces the file-fallback path so the test is
     // deterministic across darwin (system keychain) and linux/CI.
     process.env.MYSECOND_NO_KEYCHAIN = '1';
   });
 
   afterEach(() => {
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
+    fake.restore();
     delete process.env.MYSECOND_NO_KEYCHAIN;
   });
 
   it('returns the bare token when credentials file is bare-token format', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mysecond-kc-'));
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
-    process.env.HOME = home;
-    plantCredsFile(home, project, 'msd_bare_token_abc\n');
+    plantCredsFile(fake.home, project, 'msd_bare_token_abc\n');
 
     const result = getDeviceToken(project);
     expect(result).not.toBeNull();
@@ -69,11 +70,9 @@ describe('getDeviceToken — normalizes stored credential format', () => {
   it('strips the dotenv wrapper when step-5b wrote dotenv-style content', () => {
     // This is the regression case. Before the fix, .token contained the
     // literal "COMPANION_API_KEY=msd_...\nCOMPANION_API_URL=..." blob.
-    const home = mkdtempSync(join(tmpdir(), 'mysecond-kc-'));
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
-    process.env.HOME = home;
     plantCredsFile(
-      home,
+      fake.home,
       project,
       'COMPANION_API_KEY=msd_dotenv_token_xyz\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
     );
@@ -88,10 +87,8 @@ describe('getDeviceToken — normalizes stored credential format', () => {
   });
 
   it('handles dotenv format with COMPANION_API_KEY only (no URL line)', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mysecond-kc-'));
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
-    process.env.HOME = home;
-    plantCredsFile(home, project, 'COMPANION_API_KEY=msd_only_key\n');
+    plantCredsFile(fake.home, project, 'COMPANION_API_KEY=msd_only_key\n');
 
     const result = getDeviceToken(project);
     expect(result).not.toBeNull();
@@ -100,9 +97,7 @@ describe('getDeviceToken — normalizes stored credential format', () => {
   });
 
   it('returns null when no credentials file exists', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mysecond-kc-'));
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
-    process.env.HOME = home;
 
     expect(getDeviceToken(project)).toBeNull();
   });
@@ -111,11 +106,9 @@ describe('getDeviceToken — normalizes stored credential format', () => {
     // Direct guard for the Item 2 failure mode: Headers.append rejects any
     // value containing CR/LF. If a future caller pastes ReadResult.token
     // into a header again, this test ensures the value is well-formed.
-    const home = mkdtempSync(join(tmpdir(), 'mysecond-kc-'));
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
-    process.env.HOME = home;
     plantCredsFile(
-      home,
+      fake.home,
       project,
       'COMPANION_API_KEY=msd_token\nCOMPANION_API_URL=https://app.mysecond.ai\n'
     );

@@ -2,9 +2,9 @@
 // Mirrors GET /api/companion/cli-sync (down-sync) and POST /api/companion/artifacts.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, join, relative } from 'node:path';
+import { basename, join } from 'node:path';
 
-import { shortHash } from './files.js';
+import { shortHash, toPosixRel } from './files.js';
 
 export const ARTIFACT_TYPES = [
   'prd',
@@ -345,7 +345,10 @@ function walkCustomsDir(
       continue;
     }
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    const rel = relative(rootDir, fullPath);
+    // POSIX-form BEFORE the classifier gate — isCustomsArtifact's regexes are
+    // forward-slash-only, so a native win32 rel would silently kill every
+    // custom (win32 triage group A).
+    const rel = toPosixRel(rootDir, fullPath);
     // Enforce the canonical customs shape (agents flat, skills/workflows nested)
     // so stray .md files under these roots don't sync as malformed customs.
     if (!isCustomsArtifact(rel)) continue;
@@ -400,7 +403,8 @@ function walkContextDir(
     }
 
     results.push({
-      file_path: relative(rootDir, fullPath),
+      // POSIX-form wire contract (win32 triage group A).
+      file_path: toPosixRel(rootDir, fullPath),
       content,
       current_hash: shortHash(content),
     });
@@ -434,7 +438,7 @@ function walkArtifactDir(
     } catch {
       continue;
     }
-    const relativePath = relative(rootDir, fullPath);
+    const relativePath = toPosixRel(rootDir, fullPath);
     const parentDir = basename(currentDir);
     const pmNameMatch = parentDir.match(/^\d{4}-\d{2}-\d{2}-\d{4}-(.+)$/);
     const pmName = pmNameMatch && pmNameMatch[1] !== undefined ? pmNameMatch[1] : null;

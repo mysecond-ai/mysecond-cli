@@ -46,6 +46,7 @@ import {
   DeviceCodeError,
   type DeviceCodeResponse,
 } from '../device-code.js';
+import { emitBeacon } from '../beacon.js';
 import { clearDeviceToken, setDeviceToken } from '../keychain.js';
 import { MysecondError } from '../errors.js';
 import { emitStatus } from '../silent-status.js';
@@ -244,11 +245,56 @@ function printAuthBanner(
   process.stderr.write(lines.join('\n') + '\n');
 }
 
+/**
+ * Resume command hint — derived from HOW this process is running, not a
+ * fixed npx line (install-wall review):
+ *   - `@latest` could resolve a DIFFERENT version than the one that minted
+ *     the pending-auth state (mid-publish drift); echoing the RUNNING
+ *     `__VERSION__` guarantees Step 1/Step 2 version agreement.
+ *   - When running from the no-npm fallback tarball (`~/.mysecond/cli/…`,
+ *     installed by install.sh precisely because npx is broken on this
+ *     machine), an npx resume hint would re-fail the same way Step 1 did —
+ *     echo the direct `node` invocation instead.
+ * Exported for tests via `__testing`.
+ */
+function buildResumeCommand(slug: string): string {
+  const scriptPath = process.argv[1] ?? '';
+  const normalized = scriptPath.split('\\').join('/');
+  // Owned fallback layout ONLY: ~/.mysecond/cli/<version>/<entry file>.
+  // A bare `includes('/.mysecond/cli/')` would false-positive on any nested
+  // cache path under that prefix (codex P2) and route a working-npx customer
+  // to the node form.
+  const isOwnedFallbackLayout = /\/\.mysecond\/cli\/[^/]+\/[^/]+\.(?:mjs|cjs)$/.test(normalized);
+  const isFallbackInstall =
+    isOwnedFallbackLayout || process.env.MYSECOND_FALLBACK === '1';
+  // TLS-handoff continuity (install-wall PR-E review P1, cross-repo): on
+  // TLS-intercepted networks the fallback installer exports
+  // NODE_EXTRA_CA_CERTS before running Step 1 — but Step 2 runs in a FRESH
+  // shell from this printed hint. Without re-exporting, the customer passes
+  // auth and then dies on the resume's first fetch with the exact error the
+  // installer just fixed. The value is quoted (paths can contain spaces).
+  const caCerts = process.env.NODE_EXTRA_CA_CERTS;
+  const envPrefix =
+    caCerts !== undefined && caCerts !== ''
+      ? `NODE_EXTRA_CA_CERTS="${caCerts}" `
+      : '';
+  if (isFallbackInstall && scriptPath.length > 0) {
+    // Path is double-quoted: macOS home dirs can contain spaces
+    // ("/Users/Ron Yang/…") and an unquoted path splits at the space —
+    // breaking the customer's SECOND command after a successful auth
+    // (codex P1). Bash-syntax hint is deliberate: the paste instructs the
+    // agent to run commands via the Bash tool; a PowerShell-native hint
+    // ships with the Windows paste variant (PR-G).
+    return `${envPrefix}MYSECOND_CUSTOMER_SLUG=${slug} node "${scriptPath}" init --resume`;
+  }
+  return `${envPrefix}MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@${__VERSION__} init --resume`;
+}
+
 function printResumeHint(slug: string): void {
   process.stderr.write(
     [
       'Then run this command to finish installation:',
-      `  MYSECOND_CUSTOMER_SLUG=${slug} npx -y @mysecond/cli@latest init --resume`,
+      `  ${buildResumeCommand(slug)}`,
       '',
     ].join('\n') + '\n'
   );
@@ -299,6 +345,21 @@ async function runAuthOnlyMint(
     codeResp = await requestDeviceCode(codeOpts);
   } catch (err) {
     if (err instanceof DeviceCodeError) {
+      // Install-wall: the mint failing IS the funnel wall — beacon it before
+      // the process dies with the thrown error. AWAITED (bounded 3s, never
+      // rejects): fire-and-forget on a throw path doesn't survive exit.
+      // Caveat honestly noted: if the mint failed because app.mysecond.ai is
+      // unreachable, this beacon likely fails too — it exists for the OTHER
+      // classes (rate-limit, protocol/proxy-mangled responses, timeouts where
+      // a later small request can still land).
+      await emitBeacon({
+        apiBase: ctx.apiBase,
+        installId,
+        stage: 'mint_failed',
+        slug: process.env.MYSECOND_CUSTOMER_SLUG,
+        errorClass: err.code,
+        errorExcerpt: err.message,
+      });
       throw new MysecondError(
         1,
         `Couldn't request a device code (${err.code}): ${err.message}`
@@ -550,3 +611,6 @@ async function runDeviceCodeFlow(
     message: ctx.silent ? undefined : 'step 15: device authorized',
   };
 }
+
+// Test exports (pattern shared with init-runner.ts).
+export const __testing = { buildResumeCommand };
