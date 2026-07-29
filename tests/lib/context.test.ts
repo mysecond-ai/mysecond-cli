@@ -23,6 +23,18 @@ function plantKeychainTokenForTest(home: string, projectDir: string, token: stri
   chmodSync(credsFile, 0o600);
 }
 
+// Plant the machine-wide global credentials file (~/.mysecond/credentials)
+// exactly as the public plugin's `/mysecond` login skill writes it. v1.12.0:
+// getDeviceToken reads this as the FINAL fallback after project-scoped
+// lookups miss.
+function plantGlobalCredsForTest(home: string, content: string): void {
+  const dir = join(home, '.mysecond');
+  mkdirSync(dir, { recursive: true });
+  const credsFile = join(dir, 'credentials');
+  writeFileSync(credsFile, content, { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(credsFile, 0o600);
+}
+
 describe('parseGlobalFlags', () => {
   it('parses no args as defaults', () => {
     const f = parseGlobalFlags([]);
@@ -520,5 +532,109 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     buildContext(parseGlobalFlags(['--project-dir', tmp, '--silent']));
     expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
     expect(stderrBuf).not.toContain('Unset COMPANION_API_KEY in your shell');
+  });
+
+  it('does NOT rescue from the global file — an env credential keeps its meaning', () => {
+    // Codex round-1 HIGH (v1.12.0). With a legacy COMPANION_API_KEY in env
+    // and NO project-scoped credential, a machine-wide
+    // ~/.mysecond/credentials msd_ token must not hijack the env identity:
+    // think CI or a script pinning a specific team — someone running
+    // /mysecond login on that machine must not silently switch whose data
+    // the pinned job syncs. Env value stays authoritative; the original
+    // legacy-key warning fires (source=env), never the rescue variant.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('companion_legacy_abc123');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env');
+    expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
+  it('project-scoped rescue still fires when a global file is also present', () => {
+    // The v1.4.4 contract is untouched: PROJECT-scoped msd_ tokens rescue a
+    // legacy env value. Only the global file is excluded as a rescue source.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_project_scoped_token');
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_project_scoped_token');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
+  });
+});
+
+// v1.12.0 — global-file fallback, buildContext level.
+//
+// The post-`/mysecond`-login machine state: no --api-key flag, no
+// COMPANION_API_KEY in env or project .env, nothing project-scoped in
+// keychain or ~/.mysecond/projects/<hash>/ — only the machine-wide
+// ~/.mysecond/credentials the login skill wrote. Every plugin sync hook
+// (`sync`, `artifact-sync`, `emit-event`, push sweep) builds its context
+// through here, so this block is the end-to-end proof that post-login
+// hooks run authenticated (Track B P0, simple-install migration).
+describe('buildContext — global credentials fallback (v1.12.0)', () => {
+  // Fake home (HOME + USERPROFILE) so neither the project-scoped nor the
+  // global lookup can touch the real machine. On macOS the keychain probe
+  // uses account device-token-<hash(tmp project dir)> — effectively zero
+  // collision probability with a real entry, same argument as above.
+  let fakeHome: FakeHome;
+  let savedKey: string | undefined;
+  let savedUrl: string | undefined;
+  let savedClaudeDir: string | undefined;
+
+  beforeEach(() => {
+    fakeHome = installFakeHome('mysecond-ctx-');
+    savedKey = process.env.COMPANION_API_KEY;
+    savedUrl = process.env.COMPANION_API_URL;
+    savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.COMPANION_API_KEY;
+    delete process.env.COMPANION_API_URL;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  });
+
+  afterEach(() => {
+    fakeHome.restore();
+    if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
+    else process.env.COMPANION_API_KEY = savedKey;
+    if (savedUrl === undefined) delete process.env.COMPANION_API_URL;
+    else process.env.COMPANION_API_URL = savedUrl;
+    if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = savedClaudeDir;
+  });
+
+  it('resolves the token from ~/.mysecond/credentials when nothing project-scoped exists', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    // The skill's exact write shape: single COMPANION_API_KEY= line.
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_global_login_token');
+    expect(ctx.apiBase).toBe('https://app.mysecond.ai');
+  });
+
+  it('project-scoped credentials win over the global file', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_project_scoped_token');
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_project_scoped_token');
+  });
+
+  it('recovers a paired COMPANION_API_URL from the global file when shell env has none', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    plantGlobalCredsForTest(
+      fakeHome.home,
+      'COMPANION_API_KEY=msd_global_staging\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
+    );
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_global_staging');
+    expect(ctx.apiBase).toBe('https://staging.mysecond.ai');
+  });
+
+  it('a malformed global file yields an empty apiKey (existing unauthenticated error path)', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    plantGlobalCredsForTest(fakeHome.home, 'export COMPANION_API_KEY=msd_x\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('');
   });
 });

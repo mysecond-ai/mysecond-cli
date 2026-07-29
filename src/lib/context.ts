@@ -229,24 +229,44 @@ export function buildContext(flags: ParsedFlags): CommandContext {
   let apiKeySource: 'flag' | 'env' | 'keychain' | 'none' = 'none';
   let keychainRescue = false;
 
-  // Lazy keychain lookup — memoized so the rescue check and the
-  // empty-credential fallback share a single shell-out. Normalization
-  // happens inside getDeviceToken (Item 2): the returned shape already
-  // exposes `{ token, apiUrl }`, so buildContext just consumes both.
-  let keychainCache: { token: string; apiUrl: string | null } | null | undefined = undefined;
-  const loadKeychain = (): { token: string; apiUrl: string | null } | null => {
-    if (keychainCache !== undefined) return keychainCache;
+  // Lazy storage lookup — memoized per scope so repeated checks share a
+  // single shell-out. Normalization happens inside getDeviceToken (Item 2):
+  // the returned shape already exposes `{ token, apiUrl }`, so buildContext
+  // just consumes both.
+  //
+  // Two scopes exist since v1.12.0 (codex round-1 HIGH):
+  //   - 'project': keychain + project-scoped file ONLY. Used by the
+  //     legacy-env rescue — an env-provided credential must keep its
+  //     meaning (CI or a script pinning a specific team), so the
+  //     machine-wide ~/.mysecond/credentials file must never silently
+  //     switch identity out from under an explicit env credential. The
+  //     v1.4.4 rescue contract covers project-scoped stores only.
+  //   - 'machine': the full chain including the global-file fallback.
+  //     Reachable only when NO flag/env credential exists at all.
+  const storageCache: {
+    project?: { token: string; apiUrl: string | null } | null;
+    machine?: { token: string; apiUrl: string | null } | null;
+  } = {};
+  const loadStored = (
+    scope: 'project' | 'machine'
+  ): { token: string; apiUrl: string | null } | null => {
+    const cached = storageCache[scope];
+    if (cached !== undefined) return cached;
+    let result: { token: string; apiUrl: string | null } | null;
     try {
-      const fromStorage = getDeviceToken(rootDir);
-      keychainCache =
+      const fromStorage = getDeviceToken(rootDir, {
+        includeGlobalFile: scope === 'machine',
+      });
+      result =
         fromStorage !== null
           ? { token: fromStorage.token, apiUrl: fromStorage.apiUrl }
           : null;
     } catch {
-      // Best-effort. If keychain lookup throws, treat as absent.
-      keychainCache = null;
+      // Best-effort. If storage lookup throws, treat as absent.
+      result = null;
     }
-    return keychainCache;
+    storageCache[scope] = result;
+    return result;
   };
 
   if (flags.apiKey !== null && flags.apiKey.length > 0) {
@@ -259,8 +279,9 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     // server PR3b retires the key class. If keychain has a valid msd_
     // token, prefer it; the warning shifts to "your env is stale, unset
     // it to silence." Caught by codex review on v1.4.4 PR #28.
+    // Project scope ONLY — the global file never rescues (see loadStored).
     if (!apiKey.startsWith('msd_')) {
-      const fromKeychain = loadKeychain();
+      const fromKeychain = loadStored('project');
       if (fromKeychain !== null && fromKeychain.token.startsWith('msd_')) {
         apiKey = fromKeychain.token;
         apiKeySource = 'keychain';
@@ -278,7 +299,7 @@ export function buildContext(flags: ParsedFlags): CommandContext {
     }
   }
   if (apiKey.length === 0) {
-    const fromKeychain = loadKeychain();
+    const fromKeychain = loadStored('machine');
     if (fromKeychain !== null) {
       apiKey = fromKeychain.token;
       apiKeySource = 'keychain';

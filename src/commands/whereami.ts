@@ -104,7 +104,9 @@ export async function runWhereami(
       hasKey: readKey(envPath) !== null,
     },
     {
-      label: '3. Global creds ~/.mysecond/credentials (dev-only override)',
+      // v1.12.0: a REAL resolver source, not display-only — getDeviceToken
+      // reads it as the final fallback. Written by `/mysecond` login.
+      label: '3. Global creds ~/.mysecond/credentials (machine-wide fallback, written by /mysecond login)',
       path: globalPath,
       exists: existsSync(globalPath),
       hasKey: readKey(globalPath) !== null,
