@@ -11,9 +11,10 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { runSync } from '../../src/commands/sync.js';
+import { runPushOnly, runSync } from '../../src/commands/sync.js';
 import { shortHash } from '../../src/lib/files.js';
-import type { CommandContext } from '../../src/lib/context.js';
+import { buildContext, parseGlobalFlags, type CommandContext } from '../../src/lib/context.js';
+import { installFakeHome, type FakeHome } from '../helpers/fake-home.js';
 
 function tmpProject(): string {
   const root = mkdtempSync(join(tmpdir(), 'mysecond-push-only-'));
@@ -179,5 +180,142 @@ describe('mysecond sync --push-only', () => {
     const code = await runSync([], ctx(root));
     expect(code).toBe(0);
     expect(recordedSection(root, 'contextFiles')).toEqual({});
+  });
+});
+
+// P1 (2026-07-29, codex pm-os plugin review): the realtime Stop/SubagentStop
+// hook invokes the `push` SUBCOMMAND, which dispatches straight to
+// runPushOnly — runSync's COMPANION_API_KEY check is never on that path.
+// Before the preflight, an installed-but-never-connected machine collected
+// changed workspace files and POSTed their paths/contents to the server with
+// an empty bearer: the server rejected it, but the workspace data had
+// already left the machine (privacy defect; falsified the plugin README's
+// "sends nothing without a credential" claim). These tests call runPushOnly
+// DIRECTLY, mirroring the `push` subcommand dispatch.
+describe('mysecond push (runPushOnly direct) — credential preflight', () => {
+  let originalFetch: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let fake: FakeHome | null = null;
+  let savedKey: string | undefined;
+  let savedUrl: string | undefined;
+  let savedClaudeDir: string | undefined;
+  let stdoutBuf: string;
+  let stderrBuf: string;
+  let origStdoutWrite: typeof process.stdout.write;
+  let origStderrWrite: typeof process.stderr.write;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    // Env isolation for the buildContext-based test — a real
+    // COMPANION_API_KEY in the runner env would satisfy the preflight for
+    // the wrong reason.
+    savedKey = process.env.COMPANION_API_KEY;
+    savedUrl = process.env.COMPANION_API_URL;
+    savedClaudeDir = process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.COMPANION_API_KEY;
+    delete process.env.COMPANION_API_URL;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    // Capture output — the no-credential path must be SILENT.
+    stdoutBuf = '';
+    stderrBuf = '';
+    origStdoutWrite = process.stdout.write.bind(process.stdout);
+    origStderrWrite = process.stderr.write.bind(process.stderr);
+    (process.stdout.write as unknown) = ((chunk: string | Uint8Array) => {
+      stdoutBuf += typeof chunk === 'string' ? chunk : chunk.toString();
+      return true;
+    }) as typeof process.stdout.write;
+    (process.stderr.write as unknown) = ((chunk: string | Uint8Array) => {
+      stderrBuf += typeof chunk === 'string' ? chunk : chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = origStdoutWrite;
+    process.stderr.write = origStderrWrite;
+    if (fake !== null) {
+      fake.restore();
+      fake = null;
+    }
+    if (savedKey === undefined) delete process.env.COMPANION_API_KEY;
+    else process.env.COMPANION_API_KEY = savedKey;
+    if (savedUrl === undefined) delete process.env.COMPANION_API_URL;
+    else process.env.COMPANION_API_URL = savedUrl;
+    if (savedClaudeDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = savedClaudeDir;
+  });
+
+  it('no credential + changed files → ZERO network calls, silent exit 0', async () => {
+    // Sandbox home so getDeviceToken can't resolve the developer's real
+    // credentials — this ctx is built manually, but keep the machine state
+    // honest anyway.
+    fake = installFakeHome('mysecond-push-guard-');
+    const root = tmpProject();
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'never-sent-content');
+    mkdirSync(join(root, 'work/specs/outputs'), { recursive: true });
+    writeFileSync(join(root, 'work/specs/outputs/prd.md'), 'never-sent-prd');
+
+    const code = await runPushOnly(ctx(root, { apiKey: '' }));
+
+    expect(code).toBe(0);
+    // The load-bearing assertion: nothing left the machine. Not "the server
+    // rejected it" — the request must never be made.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stdoutBuf).toBe('');
+    expect(stderrBuf).toBe('');
+  });
+
+  it('with a credential the push fires exactly as before (guard is not over-eager)', async () => {
+    const root = tmpProject();
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'company-content');
+    fetchMock.mockImplementation((url: URL) => {
+      if (url.pathname === '/api/companion/files') {
+        return Promise.resolve(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+      }
+      throw new Error(`unexpected fetch to ${url.pathname}`);
+    });
+
+    const code = await runPushOnly(ctx(root));
+
+    expect(code).toBe(0);
+    expect(calledPaths(fetchMock)).toContain('/api/companion/files');
+  });
+
+  it('the global-file fallback satisfies the preflight — a /mysecond-logged-in machine pushes', async () => {
+    // End-to-end for the PR #55 + preflight interaction: no flag, no env,
+    // nothing project-scoped — only ~/.mysecond/credentials as `/mysecond`
+    // login writes it. buildContext resolves the token via the global-file
+    // fallback, so the preflight passes and the push carries that bearer.
+    fake = installFakeHome('mysecond-push-guard-');
+    const globalDir = join(fake.home, '.mysecond');
+    mkdirSync(globalDir, { recursive: true });
+    writeFileSync(join(globalDir, 'credentials'), 'COMPANION_API_KEY=msd_global_login_token\n', {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    const root = tmpProject();
+    mkdirSync(join(root, 'context'), { recursive: true });
+    writeFileSync(join(root, 'context/company.md'), 'company-content');
+    fetchMock.mockImplementation((url: URL) => {
+      if (url.pathname === '/api/companion/files') {
+        return Promise.resolve(jsonResponse({ synced: 1, skipped: 0, errors: [] }));
+      }
+      throw new Error(`unexpected fetch to ${url.pathname}`);
+    });
+
+    const built = buildContext(parseGlobalFlags(['--project-dir', root, '--push-only', '--silent']));
+    const code = await runPushOnly(built);
+
+    expect(code).toBe(0);
+    const paths = calledPaths(fetchMock);
+    expect(paths).toContain('/api/companion/files');
+    // The bearer is the global-file token — proof the fallback fed the push.
+    const init = fetchMock.mock.calls[0]![1] as { headers: Record<string, string> };
+    expect(init.headers.Authorization).toBe('Bearer msd_global_login_token');
   });
 });
