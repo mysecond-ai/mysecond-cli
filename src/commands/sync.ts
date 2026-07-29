@@ -795,6 +795,18 @@ async function runPushAll(ctx: CommandContext): Promise<number> {
  * hook path) and surfaced in interactive mode; the command always returns 0.
  */
 export async function runPushOnly(ctx: CommandContext): Promise<number> {
+  // No credential → silent skip, zero network (mirror artifact-sync /
+  // emit-event's first guard). The realtime hook reaches here via the `push`
+  // SUBCOMMAND, which dispatches straight to runPushOnly — runSync's
+  // COMPANION_API_KEY check is never on that path. Without this preflight, an
+  // installed-but-never-connected machine would still collect changed
+  // workspace files and POST their paths/contents to the server with an
+  // empty bearer — the server rejects it, but the data has already left the
+  // machine (privacy defect; also falsifies the plugin README's "sends
+  // nothing without a credential" claim). Guard BEFORE any scan: when there
+  // is no one to send to, workspace contents are never even read.
+  if (ctx.apiKey.length === 0) return 0;
+
   const state = readSyncState(ctx.rootDir);
   const installState = readInstallState(ctx.rootDir);
   const opts = silentSyncOpts(ctx);
