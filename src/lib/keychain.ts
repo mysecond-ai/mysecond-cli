@@ -304,6 +304,20 @@ function globalFileGet(): string | null {
   }
 }
 
+/**
+ * Strip ONE layer of surrounding single/double quotes — the same treatment
+ * `loadDotenv` (context.ts) and `whereami`'s readKey give dotenv values.
+ * Claude review round (PR #55): a hand-edited `COMPANION_API_KEY="msd_x"`
+ * in the global file previously resolved to the literal quoted string →
+ * silent 401 while `whereami` stripped the quotes and reported the file
+ * healthy — the exact invisible-failure class this fallback exists to
+ * eliminate. Global-file parse only; project-store formats are written by
+ * the CLI itself and never quoted.
+ */
+function stripWrappingQuotes(v: string): string {
+  return v.replace(/^["']|["']$/g, '');
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export interface SetResult {
@@ -426,16 +440,25 @@ export function getDeviceToken(
   if (!includeGlobalFile) return null;
   const fromGlobal = globalFileGet();
   if (fromGlobal !== null && /^COMPANION_API_KEY=/m.test(fromGlobal)) {
-    const { token, apiUrl } = normalizeStoredCredential(fromGlobal);
+    const parsed = normalizeStoredCredential(fromGlobal);
+    // Quote parity with loadDotenv/whereami (see stripWrappingQuotes).
+    // Empty-after-stripping (`COMPANION_API_KEY=""`) is "no credential",
+    // same as an empty-value line.
+    const token = stripWrappingQuotes(parsed.token);
     if (token.length === 0) return null;
+    const strippedUrl =
+      parsed.apiUrl === null ? null : stripWrappingQuotes(parsed.apiUrl);
+    const apiUrl = strippedUrl !== null && strippedUrl.length > 0 ? strippedUrl : null;
     return { token, storage: 'global_file', apiUrl };
   }
   return null;
 }
 
 /**
- * Best-effort delete from BOTH project-scoped stores. Used by
- * `mysecond doctor --reset`.
+ * Best-effort delete from BOTH project-scoped stores. Real caller:
+ * step-15's re-auth path (`src/lib/steps/step-15.ts`), which clears the
+ * stale token before minting a fresh one. (A `doctor --reset` flag was
+ * once planned but never shipped — doctor ignores its args.)
  *
  * Deliberately does NOT touch the global `~/.mysecond/credentials` file:
  * it is machine-wide (written by `/mysecond` login, shared across every

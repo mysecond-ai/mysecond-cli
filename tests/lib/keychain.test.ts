@@ -182,6 +182,31 @@ describe('getDeviceToken — global-file fallback (v1.12.0)', () => {
     expect(result!.apiUrl).toBe('https://staging.mysecond.ai');
   });
 
+  it('strips surrounding quotes from a quoted global value (loadDotenv/whereami parity)', () => {
+    // Claude review round (PR #55): a hand-edited COMPANION_API_KEY="msd_x"
+    // previously resolved to the literal quoted string → silent 401 while
+    // whereami stripped the quotes and reported the file healthy. Both
+    // quote styles, and a quoted URL, must resolve unquoted.
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(
+      fake.home,
+      'COMPANION_API_KEY="msd_quoted_token"\nCOMPANION_API_URL=\'https://staging.mysecond.ai\'\n'
+    );
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe('msd_quoted_token');
+    expect(result!.apiUrl).toBe('https://staging.mysecond.ai');
+    expect(result!.storage).toBe('global_file');
+  });
+
+  it('treats an empty-quoted COMPANION_API_KEY="" global value as "no credential"', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=""\n');
+
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
   it('rejects a bare-token global file — COMPANION_API_KEY= form is REQUIRED', () => {
     // Codex round-1 MEDIUM: the bare-token shortcut is a project-store
     // affordance (setDeviceToken's write shape). The global file's format
