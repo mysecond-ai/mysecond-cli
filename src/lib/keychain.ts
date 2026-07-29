@@ -285,6 +285,12 @@ function fileDelete(absoluteProjectDir: string): void {
 // `artifact-sync`, `emit-event`, push sweep) unauthenticated: the silent
 // "installed but never phoned home" failure. Read-only here; the CLI never
 // writes, chmods, or deletes this file.
+//
+// Format contract (codex round-1 MEDIUM): the global file is parsed as
+// `COMPANION_API_KEY=` lines ONLY — matching what `/mysecond` login writes
+// and what `whereami`'s readKey displays. The bare-token form is a
+// project-store format (`setDeviceToken`'s write shape), never a valid
+// login write; a bare-token global file is "no credential", not a token.
 
 function globalFileGet(): string | null {
   const filePath = getGlobalCredsPath();
@@ -353,17 +359,37 @@ export function setDeviceToken(
   return { storage: 'file_fallback', fallbackReason: platform.reason };
 }
 
+export interface GetDeviceTokenOptions {
+  /**
+   * Consult the machine-wide `~/.mysecond/credentials` fallback after
+   * project-scoped stores miss. Default true.
+   *
+   * buildContext's legacy-env rescue passes false (codex round-1 HIGH):
+   * an env-provided credential must keep its meaning — CI or a script
+   * pinning a specific team via COMPANION_API_KEY must never have its
+   * identity silently switched by a machine-wide login file appearing.
+   * Rescue may only draw from PROJECT-scoped stores (the v1.4.4
+   * contract); the global file is reachable solely when no flag/env
+   * credential exists at all.
+   */
+  includeGlobalFile?: boolean;
+}
+
 /**
  * Read the device token. Tries keychain first, then project-scoped file,
- * then the machine-wide global file (`~/.mysecond/credentials`, v1.12.0).
- * Returns null when all three miss.
+ * then (unless opted out) the machine-wide global file
+ * (`~/.mysecond/credentials`, v1.12.0). Returns null when all miss.
  *
  * Precedence invariant: a PRESENT-but-malformed higher-precedence store
  * hard-stops resolution (returns null → re-auth prompt) rather than
  * silently falling through to a lower-precedence credential. That was
  * already the keychain→file behavior; the global fallback keeps it.
  */
-export function getDeviceToken(absoluteProjectDir: string): ReadResult | null {
+export function getDeviceToken(
+  absoluteProjectDir: string,
+  opts: GetDeviceTokenOptions = {}
+): ReadResult | null {
+  const includeGlobalFile = opts.includeGlobalFile ?? true;
   const platform = platformSupportsKeychain();
 
   if (platform.supported) {
@@ -389,11 +415,17 @@ export function getDeviceToken(absoluteProjectDir: string): ReadResult | null {
 
   // Final fallback: the machine-wide file the `/mysecond` login skill
   // writes. Only consulted when nothing project-scoped exists at all —
-  // project-scoped stores always win. Malformed content is "no
-  // credential" (normalizer returns empty), never a crash or a bad
-  // bearer.
+  // project-scoped stores always win — and only when the caller didn't
+  // opt out (legacy-env rescue does; see GetDeviceTokenOptions).
+  //
+  // Strict format gate: a column-0 `COMPANION_API_KEY=` line is REQUIRED
+  // (the skill's write shape). The normalizer's bare-token shortcut is a
+  // project-store affordance and must not apply here — a bare-token
+  // global file is "no credential", not a token. Malformed content is
+  // likewise "no credential", never a crash or a bad bearer.
+  if (!includeGlobalFile) return null;
   const fromGlobal = globalFileGet();
-  if (fromGlobal !== null) {
+  if (fromGlobal !== null && /^COMPANION_API_KEY=/m.test(fromGlobal)) {
     const { token, apiUrl } = normalizeStoredCredential(fromGlobal);
     if (token.length === 0) return null;
     return { token, storage: 'global_file', apiUrl };

@@ -533,6 +533,35 @@ describe('buildContext — v1.4.4 keychain rescue', () => {
     expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
     expect(stderrBuf).not.toContain('Unset COMPANION_API_KEY in your shell');
   });
+
+  it('does NOT rescue from the global file — an env credential keeps its meaning', () => {
+    // Codex round-1 HIGH (v1.12.0). With a legacy COMPANION_API_KEY in env
+    // and NO project-scoped credential, a machine-wide
+    // ~/.mysecond/credentials msd_ token must not hijack the env identity:
+    // think CI or a script pinning a specific team — someone running
+    // /mysecond login on that machine must not silently switch whose data
+    // the pinned job syncs. Env value stays authoritative; the original
+    // legacy-key warning fires (source=env), never the rescue variant.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('companion_legacy_abc123');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env');
+    expect(stderrBuf).not.toContain('keychain-rescue=true');
+  });
+
+  it('project-scoped rescue still fires when a global file is also present', () => {
+    // The v1.4.4 contract is untouched: PROJECT-scoped msd_ tokens rescue a
+    // legacy env value. Only the global file is excluded as a rescue source.
+    const tmp = mkdtempSync(join(tmpdir(), 'mysecond-ctx-'));
+    process.env.COMPANION_API_KEY = 'companion_legacy_abc123';
+    plantKeychainTokenForTest(fakeHome.home, tmp, 'msd_project_scoped_token');
+    plantGlobalCredsForTest(fakeHome.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+    const ctx = buildContext(parseGlobalFlags(['--project-dir', tmp]));
+    expect(ctx.apiKey).toBe('msd_project_scoped_token');
+    expect(stderrBuf).toContain('[mysecond:legacy-key-detected] source=env keychain-rescue=true');
+  });
 });
 
 // v1.12.0 — global-file fallback, buildContext level.

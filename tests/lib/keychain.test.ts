@@ -182,14 +182,36 @@ describe('getDeviceToken — global-file fallback (v1.12.0)', () => {
     expect(result!.apiUrl).toBe('https://staging.mysecond.ai');
   });
 
-  it('accepts a bare-token global file (normalizer symmetry with project file)', () => {
+  it('rejects a bare-token global file — COMPANION_API_KEY= form is REQUIRED', () => {
+    // Codex round-1 MEDIUM: the bare-token shortcut is a project-store
+    // affordance (setDeviceToken's write shape). The global file's format
+    // contract is `COMPANION_API_KEY=` lines only — what `/mysecond` login
+    // writes. Anything else is "no credential" fall-through.
     const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
     plantGlobalCredsFile(fake.home, 'msd_global_bare\n');
 
-    const result = getDeviceToken(project);
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
+  it('skips the global file entirely when includeGlobalFile is false', () => {
+    // The scope buildContext's legacy-env rescue uses: project-scoped
+    // stores only, so an env credential can never be shadowed by a
+    // machine-wide login file (codex round-1 HIGH).
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    expect(getDeviceToken(project, { includeGlobalFile: false })).toBeNull();
+  });
+
+  it('includeGlobalFile: false still resolves project-scoped credentials', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantCredsFile(fake.home, project, 'msd_project_scoped_token\n');
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    const result = getDeviceToken(project, { includeGlobalFile: false });
     expect(result).not.toBeNull();
-    expect(result!.token).toBe('msd_global_bare');
-    expect(result!.storage).toBe('global_file');
+    expect(result!.token).toBe('msd_project_scoped_token');
+    expect(result!.storage).toBe('file_fallback');
   });
 
   it('project-scoped file wins when both project and global exist', () => {
