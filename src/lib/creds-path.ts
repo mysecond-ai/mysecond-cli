@@ -24,7 +24,13 @@ export function getProjectScopedCredsDir(absoluteProjectDir: string): string {
   return join(homedir(), '.mysecond', 'projects', projectHash(absoluteProjectDir));
 }
 
-/** Global (dev-only) credentials file — for `whereami` precedence display. */
+/**
+ * Global machine-wide credentials file. Written by the public plugin's
+ * `/mysecond` login skill (dotenv form `COMPANION_API_KEY=<token>`, 0600);
+ * read by `getDeviceToken` as the FINAL fallback after project-scoped
+ * lookups miss (v1.12.0 — previously display-only in `whereami`, which
+ * left post-login sync hooks unauthenticated). The CLI never writes it.
+ */
 export function getGlobalCredsPath(): string {
   return join(homedir(), '.mysecond', 'credentials');
 }

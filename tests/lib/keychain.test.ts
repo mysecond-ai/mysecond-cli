@@ -124,6 +124,136 @@ describe('getDeviceToken — normalizes stored credential format', () => {
   });
 });
 
+// v1.12.0 — global-file fallback (~/.mysecond/credentials).
+//
+// Track B (simple-install migration, 2026-07-28) found the resolver never
+// read the global path the public plugin's `/mysecond` login skill writes —
+// it existed only in `whereami`'s precedence display. Post-login, every
+// plugin sync hook ran unauthenticated: the silent "installed but never
+// phoned home" failure. `getDeviceToken` now consults the global file as
+// the FINAL fallback, after project-scoped keychain + file both miss.
+describe('getDeviceToken — global-file fallback (v1.12.0)', () => {
+  let fake: FakeHome;
+
+  /** Plant the machine-wide file exactly where `/mysecond` login writes it. */
+  function plantGlobalCredsFile(home: string, content: string): string {
+    const dir = join(home, '.mysecond');
+    mkdirSync(dir, { recursive: true });
+    const credsFile = join(dir, 'credentials');
+    writeFileSync(credsFile, content, { encoding: 'utf-8', mode: 0o600 });
+    chmodSync(credsFile, 0o600);
+    return credsFile;
+  }
+
+  beforeEach(() => {
+    fake = installFakeHome('mysecond-kc-global-');
+    // Force the file paths so the test is deterministic across darwin
+    // (system keychain) and linux/CI.
+    process.env.MYSECOND_NO_KEYCHAIN = '1';
+  });
+
+  afterEach(() => {
+    fake.restore();
+    delete process.env.MYSECOND_NO_KEYCHAIN;
+  });
+
+  it('falls back to the global file when nothing project-scoped exists (skill write shape)', () => {
+    // The exact content `/mysecond` login writes: single dotenv line.
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe('msd_global_login_token');
+    expect(result!.storage).toBe('global_file');
+    expect(result!.apiUrl).toBeNull();
+  });
+
+  it('recovers a paired COMPANION_API_URL from the global file', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(
+      fake.home,
+      'COMPANION_API_KEY=msd_global_staging\nCOMPANION_API_URL=https://staging.mysecond.ai\n'
+    );
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe('msd_global_staging');
+    expect(result!.apiUrl).toBe('https://staging.mysecond.ai');
+  });
+
+  it('accepts a bare-token global file (normalizer symmetry with project file)', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'msd_global_bare\n');
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe('msd_global_bare');
+    expect(result!.storage).toBe('global_file');
+  });
+
+  it('project-scoped file wins when both project and global exist', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantCredsFile(fake.home, project, 'msd_project_scoped_token\n');
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(result!.token).toBe('msd_project_scoped_token');
+    expect(result!.storage).toBe('file_fallback');
+  });
+
+  it('treats a malformed global file as "no credential", not a crash', () => {
+    // Structured content the normalizer rejects (export prefix). Must
+    // resolve to null so downstream hits the existing unauthenticated
+    // error path — never a multi-line bearer or a throw.
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(
+      fake.home,
+      'export COMPANION_API_KEY=msd_x\nCOMPANION_API_URL=https://app.mysecond.ai\n'
+    );
+
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
+  it('treats an empty global file as "no credential"', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, '');
+
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
+  it('treats an empty-value COMPANION_API_KEY= global file as "no credential"', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=\n');
+
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
+  it('a malformed PROJECT file hard-stops resolution — global is NOT consulted', () => {
+    // Pins the pre-existing precedence invariant: a present-but-malformed
+    // higher-precedence store returns null (re-auth prompt) instead of
+    // silently falling through to a lower-precedence credential. Same
+    // behavior the keychain→file boundary already had.
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantCredsFile(fake.home, project, 'export COMPANION_API_KEY=msd_broken\n');
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    expect(getDeviceToken(project)).toBeNull();
+  });
+
+  it('global-file token is safe as a Bearer header value', () => {
+    const project = mkdtempSync(join(tmpdir(), 'mysecond-kc-proj-'));
+    plantGlobalCredsFile(fake.home, 'COMPANION_API_KEY=msd_global_login_token\n');
+
+    const result = getDeviceToken(project);
+    expect(result).not.toBeNull();
+    expect(() => {
+      new Headers({ authorization: `Bearer ${result!.token}` });
+    }).not.toThrow();
+  });
+});
+
 // Direct unit coverage for the normalizer. Exercises inputs that the
 // `fileGet`/`macosKeychainGet` pipelines pre-trim in practice, but the
 // normalizer should defend against on its own — review feedback (codex

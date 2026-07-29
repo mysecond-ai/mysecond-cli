@@ -25,14 +25,22 @@ import { dirname } from 'node:path';
 
 import { atomicWriteFile } from './atomic-write.js';
 import {
+  getGlobalCredsPath,
   getProjectScopedCredsPath,
   getProjectScopedCredsDir,
 } from './creds-path.js';
 import { mkdirSync } from 'node:fs';
 import { projectHash } from './project-hash.js';
 
-/** Where the token came from on a successful read. */
-export type TokenStorage = 'keychain' | 'file_fallback';
+/**
+ * Where the token came from on a successful read.
+ *
+ * `global_file` (v1.12.0) is READ-only: `getDeviceToken` reports it when the
+ * machine-wide `~/.mysecond/credentials` fallback resolved the token, but
+ * `setDeviceToken` never writes there — project-scoped keychain/file remain
+ * the only write targets.
+ */
+export type TokenStorage = 'keychain' | 'file_fallback' | 'global_file';
 
 export interface ReadResult {
   /** Normalized bare token, safe to paste into a Bearer header. */
@@ -267,6 +275,29 @@ function fileDelete(absoluteProjectDir: string): void {
   }
 }
 
+// ── Global file fallback (~/.mysecond/credentials) ─────────────────────────
+//
+// Written by the public plugin's `/mysecond` login skill (mysecond-ai/pm-os,
+// skills/mysecond/SKILL.md): dotenv form `COMPANION_API_KEY=<token>\n`,
+// mode 0600, machine-wide (NOT project-hashed). Before v1.12.0 this path
+// appeared only in `whereami`'s precedence DISPLAY — the resolver never read
+// it, so a post-`/mysecond` login left every plugin sync hook (`sync`,
+// `artifact-sync`, `emit-event`, push sweep) unauthenticated: the silent
+// "installed but never phoned home" failure. Read-only here; the CLI never
+// writes, chmods, or deletes this file.
+
+function globalFileGet(): string | null {
+  const filePath = getGlobalCredsPath();
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw = readFileSync(filePath, 'utf8').trim();
+    return raw.length > 0 ? raw : null;
+  } catch {
+    // Unreadable (perms, race) — treat as absent, same as fileGet.
+    return null;
+  }
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export interface SetResult {
@@ -323,8 +354,14 @@ export function setDeviceToken(
 }
 
 /**
- * Read the device token. Tries keychain first, then file fallback. Returns
- * null when both miss.
+ * Read the device token. Tries keychain first, then project-scoped file,
+ * then the machine-wide global file (`~/.mysecond/credentials`, v1.12.0).
+ * Returns null when all three miss.
+ *
+ * Precedence invariant: a PRESENT-but-malformed higher-precedence store
+ * hard-stops resolution (returns null → re-auth prompt) rather than
+ * silently falling through to a lower-precedence credential. That was
+ * already the keychain→file behavior; the global fallback keeps it.
  */
 export function getDeviceToken(absoluteProjectDir: string): ReadResult | null {
   const platform = platformSupportsKeychain();
@@ -349,10 +386,31 @@ export function getDeviceToken(absoluteProjectDir: string): ReadResult | null {
     if (token.length === 0) return null;
     return { token, storage: 'file_fallback', apiUrl };
   }
+
+  // Final fallback: the machine-wide file the `/mysecond` login skill
+  // writes. Only consulted when nothing project-scoped exists at all —
+  // project-scoped stores always win. Malformed content is "no
+  // credential" (normalizer returns empty), never a crash or a bad
+  // bearer.
+  const fromGlobal = globalFileGet();
+  if (fromGlobal !== null) {
+    const { token, apiUrl } = normalizeStoredCredential(fromGlobal);
+    if (token.length === 0) return null;
+    return { token, storage: 'global_file', apiUrl };
+  }
   return null;
 }
 
-/** Best-effort delete from BOTH stores. Used by `mysecond doctor --reset`. */
+/**
+ * Best-effort delete from BOTH project-scoped stores. Used by
+ * `mysecond doctor --reset`.
+ *
+ * Deliberately does NOT touch the global `~/.mysecond/credentials` file:
+ * it is machine-wide (written by `/mysecond` login, shared across every
+ * project on the machine), so a per-project reset must not log out all
+ * other projects. Re-running `/mysecond` overwrites it; deleting it by
+ * hand is the manual escape hatch.
+ */
 export function clearDeviceToken(absoluteProjectDir: string): void {
   if (platformSupportsKeychain().supported) {
     macosKeychainDelete(accountFor(absoluteProjectDir));
