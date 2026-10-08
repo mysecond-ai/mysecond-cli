@@ -11,7 +11,7 @@
 // any server response shape. Tmp-redirects $HOME so install-state writes don't
 // leak into the developer's real ~/.mysecond/projects/.
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -392,6 +392,185 @@ describe('Workstream H — base plugin update sync', () => {
     const code = await runSync([], ctx(root));
     expect(code).toBe(0);
     expect(existsSync(getInstallStatePath(root))).toBe(true);
+  });
+});
+
+// Backup before overwrite: a base file with no install-state record (e.g. the
+// project folder moved, and install-state is keyed by absolute path) may hold
+// the customer's edits. Sync still updates it, but saves the old copy first.
+describe('base sync — backup before overwriting an unrecorded local file', () => {
+  let originalFetch: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    originalHome = process.env.HOME;
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'mysecond-backup-home-'));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  });
+
+  const skillPath = '.claude/skills/prd-generator/SKILL.md';
+  const newContent = '# PRD v2';
+
+  function respondWith(files: { file_path: string; content: string }[]): void {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        base_skills: files.map((f) => ({ ...f, current_hash: shortHash(f.content) })),
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+  }
+
+  function writeLocal(root: string, path: string, content: string): void {
+    mkdirSync(join(root, path, '..'), { recursive: true });
+    writeFileSync(join(root, path), content);
+  }
+
+  function backupFiles(root: string): string[] {
+    const dir = join(root, '.claude/sync-backups');
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((d) => d.isFile())
+      .map((d) => join(d.parentPath, d.name).slice(dir.length + 1));
+  }
+
+  async function syncCapturingStdout(root: string): Promise<string> {
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await runSync([], ctx(root));
+      return writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      writeSpy.mockRestore();
+    }
+  }
+
+  it('saves the local copy, then updates the file, when install-state has no record of it', async () => {
+    const root = tmpProject();
+    seedState(root);
+    const edited = '# PRD v1 — with my team’s rubric';
+    writeLocal(root, skillPath, edited);
+    respondWith([{ file_path: skillPath, content: newContent }]);
+
+    const out = await syncCapturingStdout(root);
+
+    expect(readFileSync(join(root, skillPath), 'utf8')).toBe(newContent);
+    const saved = backupFiles(root);
+    expect(saved).toHaveLength(1);
+    // <stamp>/skills/prd-generator/SKILL.md: leading .claude/ dropped so the
+    // copy is never inside a nested .claude/skills/ Claude Code could load.
+    expect(saved[0]).toMatch(/^\d{8}-\d{6}\/skills\/prd-generator\/SKILL\.md$/);
+    expect(readFileSync(join(root, '.claude/sync-backups', saved[0] as string), 'utf8')).toBe(edited);
+    expect(readInstallState(root).files[skillPath]).toBe(shortHash(newContent));
+    expect(out).toMatch(/kept a copy of 1 file\(s\) in \.claude\/sync-backups\/\d{8}-\d{6}\/ before updating them/);
+  });
+
+  it('groups every backup from one sync run in one folder', async () => {
+    const root = tmpProject();
+    seedState(root);
+    const agentPath = '.claude/agents/cto.md';
+    writeLocal(root, skillPath, '# my prd');
+    writeLocal(root, agentPath, 'my cto');
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        context_files: [],
+        custom_skills: [],
+        custom_agents: [],
+        custom_workflows: [],
+        base_plugin_version: SHA_NEW,
+        base_skills: [{ file_path: skillPath, content: newContent, current_hash: shortHash(newContent) }],
+        base_agents: [{ file_path: agentPath, content: 'cto v2', current_hash: shortHash('cto v2') }],
+        syncedAt: new Date().toISOString(),
+      }),
+    );
+
+    const out = await syncCapturingStdout(root);
+
+    const saved = backupFiles(root);
+    expect(saved).toHaveLength(2);
+    expect(new Set(saved.map((p) => p.split('/')[0])).size).toBe(1);
+    expect(saved.some((p) => p.endsWith('/agents/cto.md'))).toBe(true);
+    expect(out).toContain('kept a copy of 2 file(s)');
+  });
+
+  it('does not back up an untouched file (local matches the install-time hash)', async () => {
+    const root = tmpProject();
+    seedState(root);
+    writeLocal(root, skillPath, '# PRD v1');
+    const state = readInstallState(root);
+    state.files[skillPath] = shortHash('# PRD v1');
+    const { writeInstallState } = await import('../../src/lib/install-state.js');
+    writeInstallState(root, state);
+    respondWith([{ file_path: skillPath, content: newContent }]);
+
+    const out = await syncCapturingStdout(root);
+
+    expect(readFileSync(join(root, skillPath), 'utf8')).toBe(newContent);
+    expect(backupFiles(root)).toHaveLength(0);
+    expect(out).not.toContain('kept a copy');
+  });
+
+  it('does not back up (or touch) a customized file it skips', async () => {
+    const root = tmpProject();
+    seedState(root);
+    writeLocal(root, skillPath, '# PRD v1 — customized');
+    const state = readInstallState(root);
+    state.files[skillPath] = shortHash('# PRD v1');
+    const { writeInstallState } = await import('../../src/lib/install-state.js');
+    writeInstallState(root, state);
+    respondWith([{ file_path: skillPath, content: newContent }]);
+
+    await syncCapturingStdout(root);
+
+    expect(readFileSync(join(root, skillPath), 'utf8')).toBe('# PRD v1 — customized');
+    expect(backupFiles(root)).toHaveLength(0);
+  });
+
+  it('does not back up when the unrecorded local file already matches the new content', async () => {
+    const root = tmpProject();
+    seedState(root);
+    writeLocal(root, skillPath, newContent);
+    respondWith([{ file_path: skillPath, content: newContent }]);
+
+    await syncCapturingStdout(root);
+
+    expect(backupFiles(root)).toHaveLength(0);
+    expect(readInstallState(root).files[skillPath]).toBe(shortHash(newContent));
+  });
+
+  it('leaves the file alone when the backup cannot be written, and sync still succeeds', async () => {
+    const root = tmpProject();
+    seedState(root);
+    const edited = '# my prd';
+    writeLocal(root, skillPath, edited);
+    // A regular file where the backup folder should go makes mkdir fail.
+    writeFileSync(join(root, '.claude/sync-backups'), 'not a directory');
+    respondWith([
+      { file_path: skillPath, content: newContent },
+      { file_path: '.claude/skills/new-skill/SKILL.md', content: '# new' },
+    ]);
+
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const code = await runSync([], ctx(root));
+    writeSpy.mockRestore();
+
+    expect(code).toBe(0);
+    expect(readFileSync(join(root, skillPath), 'utf8')).toBe(edited);
+    expect(readInstallState(root).files[skillPath]).toBeUndefined();
+    // Other files still sync.
+    expect(readFileSync(join(root, '.claude/skills/new-skill/SKILL.md'), 'utf8')).toBe('# new');
   });
 });
 
