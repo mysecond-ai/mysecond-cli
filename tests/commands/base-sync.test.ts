@@ -444,7 +444,8 @@ describe('base sync — backup before overwriting an unrecorded local file', () 
     if (!existsSync(dir)) return [];
     return readdirSync(dir, { recursive: true, withFileTypes: true })
       .filter((d) => d.isFile())
-      .map((d) => join(d.parentPath, d.name).slice(dir.length + 1));
+      // Forward slashes on every OS so assertions match on Windows too.
+      .map((d) => join(d.parentPath, d.name).slice(dir.length + 1).replace(/\\/g, '/'));
   }
 
   async function syncCapturingStdout(root: string): Promise<string> {
