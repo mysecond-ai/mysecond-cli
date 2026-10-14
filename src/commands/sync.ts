@@ -95,6 +95,12 @@ interface SyncSummary {
   baseAgentsUpdated: number;
   baseWorkflowsUpdated: number;
   baseSkippedDueToCustomization: number;
+  // Local copies saved before overwriting a base file sync had no
+  // install-state record for (see backupLocalFile). Unlike skips, these are
+  // surfaced: we changed the customer's file, so they need to know where the
+  // old copy went.
+  baseBackedUp: number;
+  baseBackupDir: string | null;
   // The product-manager-os base SHA this project is now synced to. Surfaced
   // so a customer/support can see which base a session is running — a cheap
   // substitute for version pinning, and the signal for spotting a base-SHA
@@ -124,6 +130,8 @@ function emptySummary(): SyncSummary {
     baseAgentsUpdated: 0,
     baseWorkflowsUpdated: 0,
     baseSkippedDueToCustomization: 0,
+    baseBackedUp: 0,
+    baseBackupDir: null,
     basePluginVersion: null,
   };
 }
@@ -160,6 +168,45 @@ function syncCompanionFile(baseDir: string, file: CompanionFile): boolean {
   return writeLocalFile(baseDir, file.file_path, file.content);
 }
 
+// Where sync keeps a customer's copy of a base file before overwriting it
+// without an install-state record. Under .claude/ next to sync-conflicts/, but
+// the copied path drops its leading `.claude/` so a backup never sits in a
+// nested `.claude/skills/` that Claude Code could load as a live skill.
+export const BASE_BACKUPS_DIR = '.claude/sync-backups';
+
+// One backup folder per sync run, named by UTC time (YYYYMMDD-HHMMSS).
+interface BaseBackupRun {
+  stamp: string;
+  count: number;
+}
+
+function newBaseBackupRun(now: Date = new Date()): BaseBackupRun {
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  return { stamp, count: 0 };
+}
+
+function baseBackupDir(run: BaseBackupRun): string {
+  return `${BASE_BACKUPS_DIR}/${run.stamp}`;
+}
+
+// Copy `content` (the current local file) into this run's backup folder.
+// Returns false on any failure; the caller must then leave the file alone.
+function backupLocalFile(
+  rootDir: string,
+  filePath: string,
+  content: string,
+  run: BaseBackupRun
+): boolean {
+  const backupPath = `${baseBackupDir(run)}/${filePath.replace(/^\.claude\//, '')}`;
+  try {
+    if (!writeLocalFile(rootDir, backupPath, content)) return false;
+  } catch {
+    return false;
+  }
+  run.count++;
+  return true;
+}
+
 // Workstream H: write a single base plugin file (skill/agent/workflow) into
 // the project, but ONLY if the customer hasn't customized it. Customization
 // detection: compare the local SHA to the SHA we recorded in install-state
@@ -168,13 +215,14 @@ function syncCompanionFile(baseDir: string, file: CompanionFile): boolean {
 // for ops visibility.
 //
 // Returns 'updated' if we wrote, 'skipped-customized' if the local file
-// diverged from our last write, or 'unchanged' if local already matches the
-// new content.
+// diverged from our last write, 'skipped-backup-failed' if a needed backup
+// could not be saved, or 'unchanged' if local already matches the new content.
 function syncBasePluginFile(
   ctx: CommandContext,
   file: BasePluginFile,
-  installState: InstallState
-): 'updated' | 'skipped-customized' | 'unchanged' {
+  installState: InstallState,
+  backups: BaseBackupRun
+): 'updated' | 'skipped-customized' | 'skipped-backup-failed' | 'unchanged' {
   const local = readLocalFile(ctx.rootDir, file.file_path);
   const installTimeHash = installState.files[file.file_path];
 
@@ -186,6 +234,13 @@ function syncBasePluginFile(
     if (local === file.content) {
       installState.files[file.file_path] = file.current_hash;
       return 'unchanged';
+    }
+    // A local file we have no record of may hold the customer's edits:
+    // install-state is keyed by the project's absolute path, so moving or
+    // renaming the folder loses it. Keep a copy before overwriting; if the
+    // copy fails, leave the file alone and try again next sync.
+    if (local !== null && !backupLocalFile(ctx.rootDir, file.file_path, local, backups)) {
+      return 'skipped-backup-failed';
     }
     if (writeLocalFile(ctx.rootDir, file.file_path, file.content)) {
       installState.files[file.file_path] = file.current_hash;
@@ -216,15 +271,16 @@ function syncBasePluginFile(
 function syncBaseTree(
   ctx: CommandContext,
   files: readonly BasePluginFile[] | undefined,
-  installState: InstallState
+  installState: InstallState,
+  backups: BaseBackupRun
 ): { updated: number; skipped: number } {
   if (!files || files.length === 0) return { updated: 0, skipped: 0 };
   let updated = 0;
   let skipped = 0;
   for (const f of files) {
-    const outcome = syncBasePluginFile(ctx, f, installState);
+    const outcome = syncBasePluginFile(ctx, f, installState, backups);
     if (outcome === 'updated') updated++;
-    else if (outcome === 'skipped-customized') skipped++;
+    else if (outcome === 'skipped-customized' || outcome === 'skipped-backup-failed') skipped++;
   }
   return { updated, skipped };
 }
@@ -560,6 +616,11 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
         `mysecond: ${baseParts.join(', ')} updated${baseTag} — see https://app.mysecond.ai/changelog\n`,
       );
     }
+    if (summary.baseBackedUp > 0 && summary.baseBackupDir) {
+      out.write(
+        `mysecond: kept a copy of ${summary.baseBackedUp} file(s) in ${summary.baseBackupDir}/ before updating them (sync had no record of these files, so they may hold your edits)\n`,
+      );
+    }
     return;
   }
 
@@ -594,6 +655,11 @@ function printSummary(summary: SyncSummary, ctx: CommandContext): void {
   }
   if (summary.conflictsCloudKept > 0 || summary.conflictsLocalKept > 0) {
     out.write(`  Recover backed-up versions from .claude/sync-conflicts/ if needed.\n`);
+  }
+  if (summary.baseBackedUp > 0 && summary.baseBackupDir) {
+    out.write(
+      `  Kept a copy of ${summary.baseBackedUp} file(s) in ${summary.baseBackupDir}/ before updating them. Sync had no record of these files, so they may hold your edits.\n`,
+    );
   }
   if (
     summary.baseSkillsUpdated > 0 ||
@@ -1042,17 +1108,23 @@ export async function runSync(
   // next sync starts from this point. base_plugin_version may legitimately
   // be null on this response (server soft-failed) — only persist when we
   // actually got a SHA back.
-  const skillsResult = syncBaseTree(ctx, response.base_skills, installState);
+  const backups = newBaseBackupRun();
+  const skillsResult = syncBaseTree(ctx, response.base_skills, installState, backups);
   summary.baseSkillsUpdated += skillsResult.updated;
   summary.baseSkippedDueToCustomization += skillsResult.skipped;
 
-  const agentsResult = syncBaseTree(ctx, response.base_agents, installState);
+  const agentsResult = syncBaseTree(ctx, response.base_agents, installState, backups);
   summary.baseAgentsUpdated += agentsResult.updated;
   summary.baseSkippedDueToCustomization += agentsResult.skipped;
 
-  const workflowsResult = syncBaseTree(ctx, response.base_workflows, installState);
+  const workflowsResult = syncBaseTree(ctx, response.base_workflows, installState, backups);
   summary.baseWorkflowsUpdated += workflowsResult.updated;
   summary.baseSkippedDueToCustomization += workflowsResult.skipped;
+
+  if (backups.count > 0) {
+    summary.baseBackedUp = backups.count;
+    summary.baseBackupDir = baseBackupDir(backups);
+  }
 
   // Persist install-state if anything changed (new files written, hashes
   // updated, or base_plugin_version advanced). Always safe to write — the
