@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write # for the failure-notification step below
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,8 +19,45 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      # Early-fail on type errors before the slower test+build that prepublishOnly runs.
+      # Explicit gates, in the same order as PR CI (test.yml). Previously these
+      # were hidden inside npm's prepublishOnly lifecycle hook, which made the
+      # tag-push run silently diverge from PR CI and blocked v1.3.6, v1.3.7,
+      # and v1.4.4 from reaching npm. Keeping them explicit here is the source
+      # of truth — package.json no longer carries prepublishOnly.
       - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Auto-file a tracking issue when this workflow fails so silent publish
+      # breakage can't accumulate across multiple releases again. GitHub's
+      # default email notification only reaches the workflow author; an issue
+      # is visible to anyone watching the repo.
+      - name: Open issue on publish failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `npm publish failed for ${tag}`,
+              body: [
+                `The publish workflow failed while trying to ship \`${tag}\` to npm.`,
+                '',
+                `**Failed run:** ${runUrl}`,
+                `**Commit:** ${context.sha}`,
+                '',
+                'Triage steps:',
+                '1. Inspect the failed job logs at the link above.',
+                '2. Confirm whether `dist/mysecond.mjs` exists in the build step output (regression of the v1.3.6–v1.4.4 issue).',
+                '3. If the fix lands on a separate PR, re-tag (e.g., `v1.4.6`) once merged.',
+                '',
+                '_Auto-filed by `.github/workflows/publish.yml`._',
+              ].join('\n'),
+              labels: ['ci', 'release-blocker'],
+            });
